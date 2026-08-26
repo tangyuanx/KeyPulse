@@ -2,7 +2,6 @@
 #include <windowsx.h>
 #include <shellapi.h>
 #include <commdlg.h>
-#include <commctrl.h>
 #include <shlobj.h>
 #include <gdiplus.h>
 #include <winhttp.h>
@@ -30,7 +29,7 @@ namespace fs = std::filesystem;
 namespace {
 constexpr wchar_t kWindowClass[] = L"KeyPulseNativeWindow";
 constexpr wchar_t kAppName[] = L"KeyPulse";
-constexpr wchar_t kAppVersion[] = L"0.3.0";
+constexpr wchar_t kAppVersion[] = L"0.3.1";
 constexpr wchar_t kLatestReleaseApi[] = L"https://api.github.com/repos/tangyuanx/KeyPulse/releases/latest";
 constexpr UINT WM_TRAYICON = WM_APP + 1;
 constexpr UINT WM_UPDATE_RESULT = WM_APP + 2;
@@ -97,8 +96,16 @@ struct AppState {
     int date_key = 0;
     int selected_date_key = 0;
     bool history_has_data = false;
-    HWND calendar = nullptr;
-    HFONT calendar_font = nullptr;
+    bool calendar_visible = false;
+    int calendar_year = 0;
+    int calendar_month = 0;
+    RectF calendar_bounds{};
+    RectF calendar_previous_button{};
+    RectF calendar_next_button{};
+    RectF calendar_today_button{};
+    std::array<RectF, 42> calendar_date_bounds{};
+    std::array<int, 42> calendar_date_keys{};
+    std::array<bool, 42> calendar_has_data{};
     UINT selected_vk = VK_SPACE;
     ULONGLONG last_save_tick = 0;
     RectF pause_button{};
@@ -137,10 +144,6 @@ SYSTEMTIME DateKeyToSystemTime(int date_key) {
     value.wMonth = static_cast<WORD>((date_key / 100) % 100);
     value.wDay = static_cast<WORD>(date_key % 100);
     return value;
-}
-
-int SystemTimeToDateKey(const SYSTEMTIME& value) {
-    return static_cast<int>(value.wYear) * 10000 + static_cast<int>(value.wMonth) * 100 + value.wDay;
 }
 
 std::wstring DateText(int date_key, bool mark_today = true) {
@@ -797,6 +800,7 @@ void ResetForNewDay() {
     g_app.date_key = today;
     g_app.selected_date_key = today;
     g_app.history_has_data = false;
+    g_app.calendar_visible = false;
     g_app.dirty = true;
 }
 
@@ -807,6 +811,65 @@ void SelectDate(int date_key) {
     g_app.history_minutes.fill(0);
     g_app.history_has_data = date_key == g_app.date_key ||
         ReadHistoryFile(date_key, g_app.history_counts, g_app.history_minutes);
+    InvalidateRect(g_app.window, nullptr, FALSE);
+}
+
+bool IsLeapYear(int year) {
+    return year % 400 == 0 || (year % 4 == 0 && year % 100 != 0);
+}
+
+int DaysInMonth(int year, int month) {
+    constexpr int days[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    return month == 2 && IsLeapYear(year) ? 29 : days[month - 1];
+}
+
+int MondayFirstWeekday(int year, int month, int day) {
+    constexpr int offsets[] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
+    if (month < 3) --year;
+    int sunday_first = (year + year / 4 - year / 100 + year / 400 + offsets[month - 1] + day) % 7;
+    return (sunday_first + 6) % 7;
+}
+
+int CalendarDateAt(size_t index) {
+    int first = MondayFirstWeekday(g_app.calendar_year, g_app.calendar_month, 1);
+    int day = static_cast<int>(index) - first + 1;
+    int year = g_app.calendar_year;
+    int month = g_app.calendar_month;
+    if (day <= 0) {
+        if (--month == 0) { month = 12; --year; }
+        day += DaysInMonth(year, month);
+    } else if (day > DaysInMonth(year, month)) {
+        day -= DaysInMonth(year, month);
+        if (++month == 13) { month = 1; ++year; }
+    }
+    return year * 10000 + month * 100 + day;
+}
+
+void RefreshCalendarHistory() {
+    uint64_t today_total = std::accumulate(g_app.counts.begin(), g_app.counts.end(), uint64_t{0});
+    for (size_t i = 0; i < g_app.calendar_date_keys.size(); ++i) {
+        int date_key = CalendarDateAt(i);
+        g_app.calendar_date_keys[i] = date_key;
+        std::error_code error;
+        g_app.calendar_has_data[i] = date_key == g_app.date_key ? today_total > 0 : fs::exists(HistoryPath(date_key), error);
+    }
+}
+
+bool CanShowNextCalendarMonth() {
+    int today = TodayKey();
+    int current_month_key = g_app.calendar_year * 100 + g_app.calendar_month;
+    return current_month_key < today / 100;
+}
+
+void ShiftCalendarMonth(int delta) {
+    int year = g_app.calendar_year;
+    int month = g_app.calendar_month + delta;
+    if (month == 0) { month = 12; --year; }
+    if (month == 13) { month = 1; ++year; }
+    if (year < 2000 || (delta > 0 && year * 100 + month > TodayKey() / 100)) return;
+    g_app.calendar_year = year;
+    g_app.calendar_month = month;
+    RefreshCalendarHistory();
     InvalidateRect(g_app.window, nullptr, FALSE);
 }
 
@@ -834,6 +897,94 @@ void DrawButton(Graphics& g, const RectF& r, const std::wstring& label, bool pri
     FillRound(g, r, 8, fill);
     StrokeRound(g, r, 8, border);
     Text(g, label, r, 11, text_color, accent ? FontStyleBold : FontStyleRegular, StringAlignmentCenter);
+}
+
+void DrawChevron(Graphics& g, const RectF& button, bool right, bool enabled = true) {
+    SolidBrush fill(C(245, 247, 244));
+    g.FillEllipse(&fill, button);
+    Pen border(C(224, 229, 222));
+    g.DrawEllipse(&border, button);
+    Color color = enabled ? C(48, 64, 52) : C(178, 185, 179);
+    Pen pen(color, 1.8f);
+    pen.SetStartCap(LineCapRound);
+    pen.SetEndCap(LineCapRound);
+    float center_x = button.X + button.Width / 2.0f;
+    float center_y = button.Y + button.Height / 2.0f;
+    float direction = right ? 1.0f : -1.0f;
+    g.DrawLine(&pen, center_x - direction * 3.0f, center_y - 5.0f, center_x + direction * 2.0f, center_y);
+    g.DrawLine(&pen, center_x + direction * 2.0f, center_y, center_x - direction * 3.0f, center_y + 5.0f);
+}
+
+void DrawCalendar(Graphics& g, int window_width) {
+    constexpr float popup_width = 310.0f;
+    constexpr float popup_height = 342.0f;
+    float x = g_app.date_button.GetRight() - popup_width;
+    x = (std::max)(8.0f, (std::min)(x, static_cast<float>(window_width) - popup_width - 8.0f));
+    float y = g_app.date_button.GetBottom() + 6.0f;
+    g_app.calendar_bounds = RectF(x, y, popup_width, popup_height);
+
+    FillRound(g, RectF(x + 2, y + 7, popup_width, popup_height), 12, C(62, 86, 66, 30));
+    FillRound(g, g_app.calendar_bounds, 12, C(255, 255, 253));
+    StrokeRound(g, g_app.calendar_bounds, 12, C(210, 220, 210));
+
+    Text(g, std::to_wstring(g_app.calendar_year) + L"年" + std::to_wstring(g_app.calendar_month) + L"月",
+        RectF(x + 62, y + 14, popup_width - 124, 34), 16, C(35, 44, 36), FontStyleBold, StringAlignmentCenter);
+    g_app.calendar_previous_button = RectF(x + 18, y + 16, 30, 30);
+    g_app.calendar_next_button = RectF(x + popup_width - 48, y + 16, 30, 30);
+    DrawChevron(g, g_app.calendar_previous_button, false, g_app.calendar_year > 2000 || g_app.calendar_month > 1);
+    DrawChevron(g, g_app.calendar_next_button, true, CanShowNextCalendarMonth());
+
+    constexpr const wchar_t* weekdays[] = {L"一", L"二", L"三", L"四", L"五", L"六", L"日"};
+    float grid_x = x + 16.0f;
+    float cell_width = (popup_width - 32.0f) / 7.0f;
+    for (int column = 0; column < 7; ++column) {
+        Text(g, weekdays[column], RectF(grid_x + cell_width * column, y + 57, cell_width, 24),
+            10, C(117, 127, 118), FontStyleRegular, StringAlignmentCenter);
+    }
+    Pen divider(C(232, 236, 231));
+    g.DrawLine(&divider, x + 16, y + 84, x + popup_width - 16, y + 84);
+
+    int today = TodayKey();
+    uint64_t today_total = std::accumulate(g_app.counts.begin(), g_app.counts.end(), uint64_t{0});
+    float grid_y = y + 91.0f;
+    for (size_t i = 0; i < g_app.calendar_date_keys.size(); ++i) {
+        int row = static_cast<int>(i / 7);
+        int column = static_cast<int>(i % 7);
+        RectF cell(grid_x + cell_width * column, grid_y + 35.0f * row, cell_width, 35.0f);
+        g_app.calendar_date_bounds[i] = cell;
+        int date_key = g_app.calendar_date_keys[i];
+        bool current_month = date_key / 100 == g_app.calendar_year * 100 + g_app.calendar_month;
+        bool future = date_key > today;
+        bool selected = date_key == g_app.selected_date_key;
+        float circle_size = 29.0f;
+        RectF circle(cell.X + (cell.Width - circle_size) / 2.0f, cell.Y + 1.0f, circle_size, circle_size);
+        if (selected) {
+            SolidBrush selected_fill(C(47, 107, 77));
+            g.FillEllipse(&selected_fill, circle);
+        } else if (date_key == today) {
+            Pen today_ring(C(47, 107, 77), 1.5f);
+            g.DrawEllipse(&today_ring, circle);
+        }
+        Color date_color = selected ? C(255, 255, 253) :
+            (!current_month || future ? C(174, 181, 175) : C(45, 54, 46));
+        Text(g, std::to_wstring(date_key % 100), RectF(cell.X, cell.Y - 1, cell.Width, 27),
+            10.5f, date_color, selected ? FontStyleBold : FontStyleRegular, StringAlignmentCenter);
+        if (g_app.calendar_has_data[i] || (date_key == g_app.date_key && today_total > 0)) {
+            SolidBrush dot(selected ? C(224, 239, 228) : C(47, 107, 77));
+            g.FillEllipse(&dot, RectF(cell.X + cell.Width / 2.0f - 2.0f, cell.Y + 27.0f, 4.0f, 4.0f));
+        }
+    }
+
+    RectF footer(x, y + popup_height - 43.0f, popup_width, 43.0f);
+    FillRound(g, footer, 12, C(244, 248, 243));
+    SolidBrush footer_cover(C(244, 248, 243));
+    g.FillRectangle(&footer_cover, footer.X, footer.Y, footer.Width, 12.0f);
+    g.DrawLine(&divider, footer.X, footer.Y, footer.GetRight(), footer.Y);
+    SolidBrush legend_dot(C(47, 107, 77));
+    g.FillEllipse(&legend_dot, RectF(x + 20, footer.Y + 19, 6, 6));
+    Text(g, L"有记录", RectF(x + 32, footer.Y + 8, 66, 27), 9, C(101, 113, 103));
+    g_app.calendar_today_button = RectF(x + popup_width - 98, footer.Y + 7, 82, 29);
+    Text(g, L"回到今天", g_app.calendar_today_button, 10, C(47, 107, 77), FontStyleBold, StringAlignmentCenter);
 }
 
 void DrawKeyboard(Graphics& g, const RectF& bounds, bool register_hits) {
@@ -1018,6 +1169,7 @@ void DrawDashboard(Graphics& g, int width, int height) {
     Text(g, FormatNumber(VisibleCounts()[g_app.selected_vk]) + L" 次敲击", RectF(selected.X + 134, selected.Y, 150, selected.Height), 10, C(45, 56, 45), FontStyleBold);
     DrawRankPanel(g, RectF(28 + keyboard_w + 12, main_y, rank_w, 398));
     if (height > 764) DrawChart(g, RectF(28, 668, content_w, static_cast<float>(height) - 696));
+    if (g_app.calendar_visible) DrawCalendar(g, width);
 }
 
 void DrawShareCard(Graphics& g, int width, int height) {
@@ -1104,28 +1256,43 @@ void ShowMainWindow() {
 }
 
 void ShowCalendar() {
-    if (!g_app.calendar) return;
     SYSTEMTIME selected = DateKeyToSystemTime(g_app.selected_date_key);
-    MonthCal_SetCurSel(g_app.calendar, &selected);
-    SYSTEMTIME range[2]{};
-    range[1] = DateKeyToSystemTime(TodayKey());
-    MonthCal_SetRange(g_app.calendar, GDTR_MAX, range);
-    RECT required{};
-    MonthCal_GetMinReqRect(g_app.calendar, &required);
-    RECT client{};
-    GetClientRect(g_app.window, &client);
-    int width = required.right - required.left + 6;
-    int height = required.bottom - required.top + 6;
-    int x = static_cast<int>(g_app.date_button.X + g_app.date_button.Width) - width;
-    int y = static_cast<int>(g_app.date_button.GetBottom()) + 6;
-    int maximum_x = static_cast<int>(client.right) - width - 8;
-    x = (std::max)(8, (std::min)(x, maximum_x));
-    SetWindowPos(g_app.calendar, HWND_TOP, x, y, width, height, SWP_SHOWWINDOW);
-    SetFocus(g_app.calendar);
+    g_app.calendar_year = selected.wYear;
+    g_app.calendar_month = selected.wMonth;
+    g_app.calendar_visible = true;
+    RefreshCalendarHistory();
+    InvalidateRect(g_app.window, nullptr, FALSE);
 }
 
 void HideCalendar() {
-    if (g_app.calendar) ShowWindow(g_app.calendar, SW_HIDE);
+    if (!g_app.calendar_visible) return;
+    g_app.calendar_visible = false;
+    InvalidateRect(g_app.window, nullptr, FALSE);
+}
+
+bool HandleCalendarClick(float x, float y) {
+    if (!g_app.calendar_visible || !PointInside(g_app.calendar_bounds, x, y)) return false;
+    if (PointInside(g_app.calendar_previous_button, x, y)) {
+        ShiftCalendarMonth(-1);
+        return true;
+    }
+    if (PointInside(g_app.calendar_next_button, x, y)) {
+        ShiftCalendarMonth(1);
+        return true;
+    }
+    if (PointInside(g_app.calendar_today_button, x, y)) {
+        SelectDate(TodayKey());
+        HideCalendar();
+        return true;
+    }
+    for (size_t i = 0; i < g_app.calendar_date_bounds.size(); ++i) {
+        if (PointInside(g_app.calendar_date_bounds[i], x, y) && g_app.calendar_date_keys[i] <= TodayKey()) {
+            SelectDate(g_app.calendar_date_keys[i]);
+            HideCalendar();
+            return true;
+        }
+    }
+    return true;
 }
 
 void UpdateTrayTip() {
@@ -1247,38 +1414,11 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
             MessageBoxW(window, L"无法注册 Windows Raw Input 键盘输入。", L"KeyPulse", MB_OK | MB_ICONERROR);
             return -1;
         }
-        g_app.calendar = CreateWindowExW(0, MONTHCAL_CLASSW, L"",
-            WS_CHILD | WS_BORDER | MCS_NOTODAY | MCS_NOTODAYCIRCLE,
-            0, 0, 0, 0, window, reinterpret_cast<HMENU>(2001), g_app.instance, nullptr);
-        if (g_app.calendar) {
-            g_app.calendar_font = CreateFontW(-16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
-            if (g_app.calendar_font) SendMessageW(g_app.calendar, WM_SETFONT,
-                reinterpret_cast<WPARAM>(g_app.calendar_font), TRUE);
-            MonthCal_SetColor(g_app.calendar, MCSC_BACKGROUND, RGB(245, 247, 245));
-            MonthCal_SetColor(g_app.calendar, MCSC_MONTHBK, RGB(255, 255, 253));
-            MonthCal_SetColor(g_app.calendar, MCSC_TEXT, RGB(45, 56, 45));
-            MonthCal_SetColor(g_app.calendar, MCSC_TITLEBK, RGB(47, 107, 77));
-            MonthCal_SetColor(g_app.calendar, MCSC_TITLETEXT, RGB(255, 255, 253));
-            MonthCal_SetColor(g_app.calendar, MCSC_TRAILINGTEXT, RGB(154, 163, 155));
-        }
         AddTrayIcon(window);
         SetTimer(window, TIMER_UI, 500, nullptr);
         SetTimer(window, TIMER_UPDATE, UPDATE_INTERVAL_MS, nullptr);
         StartUpdateCheck(window, true);
         return 0;
-    case WM_NOTIFY: {
-        auto* header = reinterpret_cast<NMHDR*>(lparam);
-        if (header && header->hwndFrom == g_app.calendar && header->code == MCN_SELECT) {
-            auto* selection = reinterpret_cast<NMSELCHANGE*>(lparam);
-            SelectDate(SystemTimeToDateKey(selection->stSelStart));
-            HideCalendar();
-            SetFocus(window);
-            return 0;
-        }
-        return DefWindowProcW(window, message, wparam, lparam);
-    }
     case WM_INPUT:
         HandleRawInput(lparam);
         return DefWindowProcW(window, message, wparam, lparam);
@@ -1343,8 +1483,9 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
     case WM_LBUTTONUP: {
         float x = static_cast<float>(GET_X_LPARAM(lparam));
         float y = static_cast<float>(GET_Y_LPARAM(lparam));
+        if (HandleCalendarClick(x, y)) return 0;
         if (PointInside(g_app.date_button, x, y)) {
-            ShowCalendar();
+            if (g_app.calendar_visible) HideCalendar(); else ShowCalendar();
             return 0;
         }
         HideCalendar();
@@ -1362,6 +1503,12 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         else for (const auto& item : g_app.key_hitboxes) if (PointInside(item.first, x, y)) { g_app.selected_vk = item.second; InvalidateRect(window, nullptr, FALSE); break; }
         return 0;
     }
+    case WM_MOUSEWHEEL:
+        if (g_app.calendar_visible) {
+            ShiftCalendarMonth(GET_WHEEL_DELTA_WPARAM(wparam) > 0 ? -1 : 1);
+            return 0;
+        }
+        return DefWindowProcW(window, message, wparam, lparam);
     case WM_SIZE:
         HideCalendar();
         return 0;
@@ -1414,7 +1561,6 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         KillTimer(window, TIMER_UPDATE);
         SaveData();
         Shell_NotifyIconW(NIM_DELETE, &g_app.tray);
-        if (g_app.calendar_font) DeleteObject(g_app.calendar_font);
         PostQuitMessage(0);
         return 0;
     default:
@@ -1442,8 +1588,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show_command) {
     }
     SetProcessDPIAware();
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-    INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_DATE_CLASSES};
-    InitCommonControlsEx(&controls);
     GdiplusStartupInput gdiplus_input;
     GdiplusStartup(&g_app.gdiplus_token, &gdiplus_input, nullptr);
     g_app.instance = instance;
@@ -1461,7 +1605,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show_command) {
     RECT desired{0, 0, 1360, 880};
     AdjustWindowRectEx(&desired, WS_OVERLAPPEDWINDOW, FALSE, 0);
     int screen_w = GetSystemMetrics(SM_CXSCREEN), screen_h = GetSystemMetrics(SM_CYSCREEN);
-    g_app.window = CreateWindowExW(0, kWindowClass, kAppName, WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
+    g_app.window = CreateWindowExW(0, kWindowClass, kAppName, WS_OVERLAPPEDWINDOW,
         (screen_w - (desired.right - desired.left)) / 2, (screen_h - (desired.bottom - desired.top)) / 2,
         desired.right - desired.left, desired.bottom - desired.top, nullptr, nullptr, instance, nullptr);
     if (!g_app.window) return 1;
