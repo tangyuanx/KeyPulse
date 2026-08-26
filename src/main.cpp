@@ -2,6 +2,7 @@
 #include <windowsx.h>
 #include <shellapi.h>
 #include <commdlg.h>
+#include <commctrl.h>
 #include <shlobj.h>
 #include <gdiplus.h>
 #include <winhttp.h>
@@ -29,7 +30,7 @@ namespace fs = std::filesystem;
 namespace {
 constexpr wchar_t kWindowClass[] = L"KeyPulseNativeWindow";
 constexpr wchar_t kAppName[] = L"KeyPulse";
-constexpr wchar_t kAppVersion[] = L"0.2.3";
+constexpr wchar_t kAppVersion[] = L"0.3.0";
 constexpr wchar_t kLatestReleaseApi[] = L"https://api.github.com/repos/tangyuanx/KeyPulse/releases/latest";
 constexpr UINT WM_TRAYICON = WM_APP + 1;
 constexpr UINT WM_UPDATE_RESULT = WM_APP + 2;
@@ -42,6 +43,7 @@ constexpr UINT ID_TRAY_EXPORT = 1003;
 constexpr UINT ID_TRAY_UPDATE = 1004;
 constexpr UINT ID_TRAY_EXIT = 1005;
 constexpr uint32_t DATA_MAGIC = 0x4B50554C; // KPUL
+constexpr uint32_t HISTORY_MAGIC = 0x4B504844; // KPHD
 
 struct KeyDef { const wchar_t* label; UINT vk; float units; };
 
@@ -67,6 +69,15 @@ struct PersistedData {
     uint32_t minute_count[60]{};
 };
 
+struct DailyHistoryData {
+    uint32_t magic = HISTORY_MAGIC;
+    uint32_t version = 1;
+    int32_t date_key = 0;
+    uint32_t reserved = 0;
+    uint64_t counts[256]{};
+    uint32_t minute_count[1440]{};
+};
+
 struct AppState {
     HWND window = nullptr;
     HINSTANCE instance = nullptr;
@@ -76,17 +87,25 @@ struct AppState {
     std::array<bool, 256> key_down{};
     std::array<int64_t, 60> minute_stamp{};
     std::array<uint32_t, 60> minute_count{};
+    std::array<uint32_t, 1440> day_minutes{};
+    std::array<uint64_t, 256> history_counts{};
+    std::array<uint32_t, 1440> history_minutes{};
     bool running = true;
     bool exit_requested = false;
     bool dirty = false;
     bool tray_hint_shown = false;
     int date_key = 0;
+    int selected_date_key = 0;
+    bool history_has_data = false;
+    HWND calendar = nullptr;
+    HFONT calendar_font = nullptr;
     UINT selected_vk = VK_SPACE;
     ULONGLONG last_save_tick = 0;
     RectF pause_button{};
     RectF reset_button{};
     RectF export_button{};
     RectF update_button{};
+    RectF date_button{};
     int update_busy = 0;
     bool update_available = false;
     bool update_check_silent = false;
@@ -112,13 +131,31 @@ int64_t EpochMinute() {
     return static_cast<int64_t>(std::time(nullptr) / 60);
 }
 
-std::wstring TodayText() {
+SYSTEMTIME DateKeyToSystemTime(int date_key) {
+    SYSTEMTIME value{};
+    value.wYear = static_cast<WORD>(date_key / 10000);
+    value.wMonth = static_cast<WORD>((date_key / 100) % 100);
+    value.wDay = static_cast<WORD>(date_key % 100);
+    return value;
+}
+
+int SystemTimeToDateKey(const SYSTEMTIME& value) {
+    return static_cast<int>(value.wYear) * 10000 + static_cast<int>(value.wMonth) * 100 + value.wDay;
+}
+
+std::wstring DateText(int date_key, bool mark_today = true) {
+    SYSTEMTIME value = DateKeyToSystemTime(date_key);
+    wchar_t text[64]{};
+    swprintf_s(text, L"%d年%d月%d日%s", value.wYear, value.wMonth, value.wDay,
+        mark_today && date_key == TodayKey() ? L"  今天" : L"");
+    return text;
+}
+
+int CurrentMinuteOfDay() {
     std::time_t now = std::time(nullptr);
     std::tm local{};
     localtime_s(&local, &now);
-    wchar_t value[64]{};
-    swprintf_s(value, L"%d年%d月%d日 · 今天", local.tm_year + 1900, local.tm_mon + 1, local.tm_mday);
-    return value;
+    return local.tm_hour * 60 + local.tm_min;
 }
 
 std::wstring FormatNumber(uint64_t n) {
@@ -188,7 +225,20 @@ std::wstring KeyLabel(UINT vk) {
 }
 
 uint64_t TotalCount() {
-    return std::accumulate(g_app.counts.begin(), g_app.counts.end(), uint64_t{0});
+    const auto& counts = g_app.selected_date_key == g_app.date_key ? g_app.counts : g_app.history_counts;
+    return std::accumulate(counts.begin(), counts.end(), uint64_t{0});
+}
+
+bool ViewingToday() {
+    return g_app.selected_date_key == g_app.date_key;
+}
+
+const std::array<uint64_t, 256>& VisibleCounts() {
+    return ViewingToday() ? g_app.counts : g_app.history_counts;
+}
+
+const std::array<uint32_t, 1440>& VisibleMinutes() {
+    return ViewingToday() ? g_app.day_minutes : g_app.history_minutes;
 }
 
 uint32_t CurrentRate() {
@@ -205,21 +255,16 @@ uint32_t PeakRate() {
 }
 
 uint32_t ActiveMinutes() {
-    uint32_t active = 0;
-    int64_t now = EpochMinute();
-    for (size_t i = 0; i < 60; ++i) {
-        if (g_app.minute_stamp[i] > now - 60 && g_app.minute_count[i] > 0) ++active;
-    }
-    return active;
+    return static_cast<uint32_t>(std::count_if(VisibleMinutes().begin(), VisibleMinutes().end(),
+        [](uint32_t value) { return value > 0; }));
 }
 
-void ResetForNewDay() {
-    g_app.counts.fill(0);
-    g_app.minute_stamp.fill(0);
-    g_app.minute_count.fill(0);
-    g_app.date_key = TodayKey();
-    g_app.dirty = true;
+uint32_t DayPeakRate() {
+    return *std::max_element(VisibleMinutes().begin(), VisibleMinutes().end());
 }
+
+void SaveData();
+void ResetForNewDay();
 
 fs::path ExecutablePath() {
     std::array<wchar_t, 32768> buffer{};
@@ -636,6 +681,60 @@ int ApplyDownloadedUpdate(const fs::path& source, const fs::path& target, DWORD 
     return reinterpret_cast<INT_PTR>(launched) > 32 ? 0 : 1;
 }
 
+fs::path HistoryPath(int date_key) {
+    return g_app.data_directory / L"history" / (std::to_wstring(date_key) + L".dat");
+}
+
+bool WriteHistoryFile(int date_key, const std::array<uint64_t, 256>& counts,
+                      const std::array<uint32_t, 1440>& minutes) {
+    try {
+        fs::create_directories(g_app.data_directory / L"history");
+        DailyHistoryData data;
+        data.date_key = date_key;
+        std::copy(counts.begin(), counts.end(), data.counts);
+        std::copy(minutes.begin(), minutes.end(), data.minute_count);
+        fs::path target = HistoryPath(date_key);
+        fs::path temp = target;
+        temp += L".tmp";
+        std::ofstream stream(temp, std::ios::binary | std::ios::trunc);
+        stream.write(reinterpret_cast<const char*>(&data), sizeof(data));
+        stream.close();
+        return stream && MoveFileExW(temp.c_str(), target.c_str(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+    } catch (...) {
+        return false;
+    }
+}
+
+bool ReadHistoryFile(int date_key, std::array<uint64_t, 256>& counts,
+                     std::array<uint32_t, 1440>& minutes) {
+    try {
+        DailyHistoryData data;
+        std::ifstream stream(HistoryPath(date_key), std::ios::binary);
+        stream.read(reinterpret_cast<char*>(&data), sizeof(data));
+        if (stream.gcount() != sizeof(data) || data.magic != HISTORY_MAGIC ||
+            data.version != 1 || data.date_key != date_key) return false;
+        std::copy(std::begin(data.counts), std::end(data.counts), counts.begin());
+        std::copy(std::begin(data.minute_count), std::end(data.minute_count), minutes.begin());
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+std::array<uint32_t, 1440> MinutesFromLegacyRing(const PersistedData& data) {
+    std::array<uint32_t, 1440> result{};
+    for (size_t i = 0; i < 60; ++i) {
+        if (data.minute_stamp[i] <= 0 || data.minute_count[i] == 0) continue;
+        std::time_t timestamp = static_cast<std::time_t>(data.minute_stamp[i] * 60);
+        std::tm local{};
+        localtime_s(&local, &timestamp);
+        int date_key = (local.tm_year + 1900) * 10000 + (local.tm_mon + 1) * 100 + local.tm_mday;
+        if (date_key == data.date_key) result[static_cast<size_t>(local.tm_hour * 60 + local.tm_min)] = data.minute_count[i];
+    }
+    return result;
+}
+
 void SaveData() {
     try {
         fs::create_directories(g_app.data_directory);
@@ -651,6 +750,7 @@ void SaveData() {
         stream.write(reinterpret_cast<const char*>(&data), sizeof(data));
         stream.close();
         MoveFileExW(temp.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+        WriteHistoryFile(g_app.date_key, g_app.counts, g_app.day_minutes);
         g_app.dirty = false;
         g_app.last_save_tick = GetTickCount64();
     } catch (...) { }
@@ -659,18 +759,55 @@ void SaveData() {
 void LoadData() {
     g_app.data_directory = ResolveDataDirectory();
     g_app.date_key = TodayKey();
+    g_app.selected_date_key = g_app.date_key;
     try {
         std::ifstream stream(g_app.data_directory / L"keypulse.dat", std::ios::binary);
         PersistedData data;
         stream.read(reinterpret_cast<char*>(&data), sizeof(data));
-        if (stream.gcount() == sizeof(data) && data.magic == DATA_MAGIC && data.version == 1 && data.date_key == g_app.date_key) {
-            std::copy(std::begin(data.counts), std::end(data.counts), g_app.counts.begin());
-            std::copy(std::begin(data.minute_stamp), std::end(data.minute_stamp), g_app.minute_stamp.begin());
-            std::copy(std::begin(data.minute_count), std::end(data.minute_count), g_app.minute_count.begin());
+        if (stream.gcount() == sizeof(data) && data.magic == DATA_MAGIC && data.version == 1) {
             g_app.running = data.paused == 0;
+            auto legacy_minutes = MinutesFromLegacyRing(data);
+            if (data.date_key == g_app.date_key) {
+                std::copy(std::begin(data.counts), std::end(data.counts), g_app.counts.begin());
+                std::copy(std::begin(data.minute_stamp), std::end(data.minute_stamp), g_app.minute_stamp.begin());
+                std::copy(std::begin(data.minute_count), std::end(data.minute_count), g_app.minute_count.begin());
+                ReadHistoryFile(g_app.date_key, g_app.history_counts, g_app.day_minutes);
+                for (size_t i = 0; i < legacy_minutes.size(); ++i) {
+                    if (legacy_minutes[i] > 0) g_app.day_minutes[i] = legacy_minutes[i];
+                }
+            } else if (data.date_key > 20000101 && data.date_key < g_app.date_key) {
+                std::array<uint64_t, 256> previous_counts{};
+                std::copy(std::begin(data.counts), std::end(data.counts), previous_counts.begin());
+                WriteHistoryFile(data.date_key, previous_counts, legacy_minutes);
+            }
         }
     } catch (...) { }
     g_app.last_save_tick = GetTickCount64();
+}
+
+void ResetForNewDay() {
+    int today = TodayKey();
+    if (g_app.date_key != 0 && g_app.date_key != today) SaveData();
+    g_app.counts.fill(0);
+    g_app.minute_stamp.fill(0);
+    g_app.minute_count.fill(0);
+    g_app.day_minutes.fill(0);
+    g_app.history_counts.fill(0);
+    g_app.history_minutes.fill(0);
+    g_app.date_key = today;
+    g_app.selected_date_key = today;
+    g_app.history_has_data = false;
+    g_app.dirty = true;
+}
+
+void SelectDate(int date_key) {
+    if (date_key > TodayKey()) return;
+    g_app.selected_date_key = date_key;
+    g_app.history_counts.fill(0);
+    g_app.history_minutes.fill(0);
+    g_app.history_has_data = date_key == g_app.date_key ||
+        ReadHistoryFile(date_key, g_app.history_counts, g_app.history_minutes);
+    InvalidateRect(g_app.window, nullptr, FALSE);
 }
 
 Color HeatColor(uint64_t value, uint64_t maximum) {
@@ -703,7 +840,8 @@ void DrawKeyboard(Graphics& g, const RectF& bounds, bool register_hits) {
     FillRound(g, bounds, 8, C(245, 247, 243));
     StrokeRound(g, bounds, 8, C(218, 224, 216));
     auto rows = KeyboardRows();
-    uint64_t maximum = *std::max_element(g_app.counts.begin(), g_app.counts.end());
+    const auto& counts = VisibleCounts();
+    uint64_t maximum = *std::max_element(counts.begin(), counts.end());
     const float pad = 11.0f, gap = 5.0f;
     float row_h = (bounds.Height - pad * 2 - gap * static_cast<float>(rows.size() - 1)) / static_cast<float>(rows.size());
     if (register_hits) g_app.key_hitboxes.clear();
@@ -720,14 +858,14 @@ void DrawKeyboard(Graphics& g, const RectF& bounds, bool register_hits) {
                 x += r.Width + gap;
                 continue;
             }
-            Color fill = HeatColor(g_app.counts[key.vk], maximum);
+            Color fill = HeatColor(counts[key.vk], maximum);
             FillRound(g, r, 4, fill);
-            bool bright = g_app.counts[key.vk] > maximum * 45 / 100 && maximum > 0;
+            bool bright = counts[key.vk] > maximum * 45 / 100 && maximum > 0;
             bool selected = register_hits && key.vk == g_app.selected_vk;
             StrokeRound(g, r, 4, selected ? C(34, 103, 68) : C(204, 211, 202), selected ? 2.0f : 1.0f);
             Text(g, key.label, RectF(r.X + 6, r.Y + 3, r.Width - 12, r.Height * .46f), r.Width < 42 ? 8.0f : 9.0f,
                  bright ? C(255, 255, 253) : C(39, 46, 40), FontStyleRegular);
-            if (g_app.counts[key.vk] > 0) Text(g, FormatNumber(g_app.counts[key.vk]), RectF(r.X + 6, r.Y + r.Height * .48f, r.Width - 12, r.Height * .40f), 7,
+            if (counts[key.vk] > 0) Text(g, FormatNumber(counts[key.vk]), RectF(r.X + 6, r.Y + r.Height * .48f, r.Width - 12, r.Height * .40f), 7,
                  bright ? C(226, 240, 229) : C(115, 126, 116));
             if (register_hits) g_app.key_hitboxes.emplace_back(r, key.vk);
             x += r.Width + gap;
@@ -737,7 +875,8 @@ void DrawKeyboard(Graphics& g, const RectF& bounds, bool register_hits) {
 
 std::vector<std::pair<UINT, uint64_t>> TopKeys(size_t count) {
     std::vector<std::pair<UINT, uint64_t>> items;
-    for (UINT i = 0; i < 256; ++i) if (g_app.counts[i] > 0) items.emplace_back(i, g_app.counts[i]);
+    const auto& counts = VisibleCounts();
+    for (UINT i = 0; i < 256; ++i) if (counts[i] > 0) items.emplace_back(i, counts[i]);
     std::sort(items.begin(), items.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
     if (items.size() > count) items.resize(count);
     return items;
@@ -766,25 +905,40 @@ void DrawRankPanel(Graphics& g, const RectF& panel) {
 void DrawChart(Graphics& g, const RectF& panel) {
     FillRound(g, panel, 8, C(255, 255, 253));
     StrokeRound(g, panel, 8, C(216, 222, 214));
-    Text(g, L"最近 60 分钟", RectF(panel.X + 16, panel.Y + 10, 150, 22), 12, C(30, 39, 30), FontStyleBold);
-    Text(g, L"每分钟敲击次数", RectF(panel.X + 16, panel.Y + 32, 150, 16), 8, C(148, 156, 148));
+    Text(g, ViewingToday() ? L"最近 60 分钟" : L"当日节奏", RectF(panel.X + 16, panel.Y + 10, 150, 22), 12, C(30, 39, 30), FontStyleBold);
+    Text(g, ViewingToday() ? L"每分钟敲击次数" : L"每 10 分钟敲击次数", RectF(panel.X + 16, panel.Y + 32, 150, 16), 8, C(148, 156, 148));
     RectF chart(panel.X + 170, panel.Y + 14, panel.Width - 188, panel.Height - 26);
-    uint32_t peak = (std::max)(PeakRate(), 1u);
-    int64_t now = EpochMinute();
     Pen grid(C(232, 236, 230));
     for (int i = 0; i < 3; ++i) {
         float y = chart.Y + chart.Height * static_cast<float>(i) / 2.0f;
         g.DrawLine(&grid, chart.X, y, chart.GetRight(), y);
     }
     std::vector<PointF> points;
-    points.reserve(60);
-    for (int i = 0; i < 60; ++i) {
-        int64_t stamp = now - 59 + i;
-        size_t slot = static_cast<size_t>(stamp % 60);
-        uint32_t value = g_app.minute_stamp[slot] == stamp ? g_app.minute_count[slot] : 0;
-        float x = chart.X + chart.Width * static_cast<float>(i) / 59.0f;
-        float y = chart.GetBottom() - chart.Height * static_cast<float>(value) / static_cast<float>(peak);
-        points.emplace_back(x, y);
+    if (ViewingToday()) {
+        uint32_t peak = (std::max)(PeakRate(), 1u);
+        int64_t now = EpochMinute();
+        points.reserve(60);
+        for (int i = 0; i < 60; ++i) {
+            int64_t stamp = now - 59 + i;
+            size_t slot = static_cast<size_t>(stamp % 60);
+            uint32_t value = g_app.minute_stamp[slot] == stamp ? g_app.minute_count[slot] : 0;
+            float x = chart.X + chart.Width * static_cast<float>(i) / 59.0f;
+            float y = chart.GetBottom() - chart.Height * static_cast<float>(value) / static_cast<float>(peak);
+            points.emplace_back(x, y);
+        }
+    } else {
+        std::array<uint32_t, 144> buckets{};
+        for (size_t i = 0; i < g_app.history_minutes.size(); ++i) buckets[i / 10] += g_app.history_minutes[i];
+        uint32_t peak = (std::max)(*std::max_element(buckets.begin(), buckets.end()), 1u);
+        points.reserve(buckets.size());
+        for (size_t i = 0; i < buckets.size(); ++i) {
+            float x = chart.X + chart.Width * static_cast<float>(i) / static_cast<float>(buckets.size() - 1);
+            float y = chart.GetBottom() - chart.Height * static_cast<float>(buckets[i]) / static_cast<float>(peak);
+            points.emplace_back(x, y);
+        }
+        if (!g_app.history_has_data || TotalCount() == 0) {
+            Text(g, L"这一天没有统计数据", chart, 12, C(132, 140, 133), FontStyleRegular, StringAlignmentCenter);
+        }
     }
     if (points.size() > 1) {
         Pen line(C(47, 107, 77), 2.2f);
@@ -806,7 +960,7 @@ void DrawDashboard(Graphics& g, int width, int height) {
     FillRound(g, RectF(28, 16, 36, 36), 8, C(47, 107, 77));
     Text(g, L"K", RectF(28, 16, 36, 36), 17, C(255, 255, 253), FontStyleBold, StringAlignmentCenter);
     Text(g, L"KeyPulse", RectF(74, 14, 150, 22), 16, C(27, 35, 27), FontStyleBold);
-    Text(g, std::wstring(L"输入节奏仪表盘 · v") + kAppVersion, RectF(74, 35, 190, 16), 9, C(118, 128, 119));
+    Text(g, std::wstring(L"v") + kAppVersion, RectF(74, 35, 190, 16), 9, C(118, 128, 119));
     float right = static_cast<float>(width) - 28;
     g_app.export_button = RectF(right - 104, 17, 104, 34);
     g_app.update_button = RectF(right - 214, 17, 100, 34);
@@ -821,11 +975,10 @@ void DrawDashboard(Graphics& g, int width, int height) {
     DrawButton(g, g_app.update_button, update_label, false, g_app.update_available || g_app.update_busy == 2);
     DrawButton(g, g_app.export_button, L"导出图片");
     float content_w = static_cast<float>(width) - 56;
-    Text(g, L"键盘敲击统计", RectF(28, 83, 330, 38), 27, C(25, 31, 26), FontStyleBold);
-    Text(g, L"查看今天的输入节奏与按键分布", RectF(28, 121, 380, 22), 11, C(111, 120, 112));
-    Text(g, L"仅统计次数，不记录输入内容", RectF(static_cast<float>(width) - 360, 86, 332, 24), 11, C(83, 99, 85), FontStyleRegular, StringAlignmentFar);
-    Text(g, TodayText(), RectF(static_cast<float>(width) - 360, 114, 332, 20), 9, C(139, 147, 140), FontStyleRegular, StringAlignmentFar);
-    float cards_y = 156;
+    Text(g, L"键盘敲击统计", RectF(28, 86, 330, 38), 27, C(25, 31, 26), FontStyleBold);
+    g_app.date_button = RectF(static_cast<float>(width) - 250, 88, 222, 36);
+    DrawButton(g, g_app.date_button, DateText(g_app.selected_date_key) + L"  ▾");
+    float cards_y = 140;
     float card_w = content_w / 4;
     RectF metric_strip(28, cards_y, content_w, 102);
     FillRound(g, metric_strip, 8, C(255, 255, 253));
@@ -835,19 +988,26 @@ void DrawDashboard(Graphics& g, int width, int height) {
         float divider_x = metric_strip.X + card_w * static_cast<float>(i);
         g.DrawLine(&metric_divider, divider_x, cards_y + 18, divider_x, cards_y + 84);
     }
-    DrawStatCard(g, 28, cards_y, card_w, L"今日敲击", FormatNumber(TotalCount()) + L" 次", g_app.running ? L"正在实时记录" : L"记录已暂停", C(47, 107, 77));
-    DrawStatCard(g, 28 + card_w, cards_y, card_w, L"当前速度", std::to_wstring(CurrentRate()) + L" 次/分", L"当前分钟累计", C(47, 107, 77));
-    DrawStatCard(g, 28 + card_w * 2, cards_y, card_w, L"峰值速度", std::to_wstring(PeakRate()) + L" 次/分", L"最近 60 分钟", C(225, 124, 36));
-    DrawStatCard(g, 28 + card_w * 3, cards_y, card_w, L"活跃时间", std::to_wstring(ActiveMinutes()) + L" 分钟", L"最近 60 分钟", C(47, 107, 77));
-    float main_y = 272;
+    if (ViewingToday()) {
+        DrawStatCard(g, 28, cards_y, card_w, L"今日敲击", FormatNumber(TotalCount()) + L" 次", g_app.running ? L"正在实时记录" : L"记录已暂停", C(47, 107, 77));
+        DrawStatCard(g, 28 + card_w, cards_y, card_w, L"当前速度", std::to_wstring(CurrentRate()) + L" 次/分", L"当前分钟累计", C(47, 107, 77));
+        DrawStatCard(g, 28 + card_w * 2, cards_y, card_w, L"峰值速度", std::to_wstring(DayPeakRate()) + L" 次/分", L"今天", C(225, 124, 36));
+        DrawStatCard(g, 28 + card_w * 3, cards_y, card_w, L"活跃时间", std::to_wstring(ActiveMinutes()) + L" 分钟", L"今天", C(47, 107, 77));
+    } else {
+        size_t key_count = static_cast<size_t>(std::count_if(VisibleCounts().begin(), VisibleCounts().end(), [](uint64_t value) { return value > 0; }));
+        DrawStatCard(g, 28, cards_y, card_w, L"当日敲击", FormatNumber(TotalCount()) + L" 次", g_app.history_has_data ? L"历史记录" : L"无统计数据", C(47, 107, 77));
+        DrawStatCard(g, 28 + card_w, cards_y, card_w, L"峰值速度", std::to_wstring(DayPeakRate()) + L" 次/分", L"当日每分钟峰值", C(225, 124, 36));
+        DrawStatCard(g, 28 + card_w * 2, cards_y, card_w, L"活跃时间", std::to_wstring(ActiveMinutes()) + L" 分钟", L"当日", C(47, 107, 77));
+        DrawStatCard(g, 28 + card_w * 3, cards_y, card_w, L"使用按键", std::to_wstring(key_count) + L" 个", L"当日", C(47, 107, 77));
+    }
+    float main_y = 256;
     float rank_w = 252;
     float keyboard_w = content_w - rank_w - 12;
     RectF keyboard_panel(28, main_y, keyboard_w, 398);
     FillRound(g, keyboard_panel, 8, C(255, 255, 253));
     StrokeRound(g, keyboard_panel, 8, C(216, 222, 214));
     Text(g, L"键盘热力图", RectF(44, main_y + 10, 200, 23), 13, C(30, 39, 30), FontStyleBold);
-    Text(g, L"颜色越亮，敲击越频繁 · 点击按键查看详情", RectF(44, main_y + 32, 300, 17), 9, C(148, 156, 148));
-    RectF keyboard(43, main_y + 56, keyboard_w - 30, 284);
+    RectF keyboard(43, main_y + 42, keyboard_w - 30, 298);
     DrawKeyboard(g, keyboard, true);
     RectF selected(43, main_y + 352, keyboard_w - 30, 32);
     FillRound(g, selected, 7, C(240, 243, 237));
@@ -855,9 +1015,9 @@ void DrawDashboard(Graphics& g, int width, int height) {
     RectF selected_key(selected.X + 75, selected.Y + 5, 48, 22);
     FillRound(g, selected_key, 4, C(35, 45, 34));
     Text(g, KeyLabel(g_app.selected_vk), selected_key, 8, C(232, 239, 228), FontStyleBold, StringAlignmentCenter);
-    Text(g, FormatNumber(g_app.counts[g_app.selected_vk]) + L" 次敲击", RectF(selected.X + 134, selected.Y, 150, selected.Height), 10, C(45, 56, 45), FontStyleBold);
+    Text(g, FormatNumber(VisibleCounts()[g_app.selected_vk]) + L" 次敲击", RectF(selected.X + 134, selected.Y, 150, selected.Height), 10, C(45, 56, 45), FontStyleBold);
     DrawRankPanel(g, RectF(28 + keyboard_w + 12, main_y, rank_w, 398));
-    if (height > 780) DrawChart(g, RectF(28, 684, content_w, static_cast<float>(height) - 712));
+    if (height > 764) DrawChart(g, RectF(28, 668, content_w, static_cast<float>(height) - 696));
 }
 
 void DrawShareCard(Graphics& g, int width, int height) {
@@ -870,15 +1030,15 @@ void DrawShareCard(Graphics& g, int width, int height) {
     FillRound(g, RectF(58, 48, 46, 46), 8, C(47, 107, 77));
     Text(g, L"K", RectF(58, 48, 46, 46), 22, C(255, 255, 253), FontStyleBold, StringAlignmentCenter);
     Text(g, L"KeyPulse", RectF(118, 46, 190, 28), 22, C(25, 31, 26), FontStyleBold);
-    Text(g, L"我的今日键盘热力图", RectF(118, 73, 260, 22), 12, C(94, 104, 95));
-    Text(g, TodayText(), RectF(width - 400.0f, 50, 330, 36), 13, C(76, 84, 77), FontStyleRegular, StringAlignmentFar);
-    Text(g, L"今日敲击", RectF(58, 122, 220, 66), 40, C(29, 34, 30), FontStyleBold);
+    Text(g, L"我的键盘热力图", RectF(118, 73, 260, 22), 12, C(94, 104, 95));
+    Text(g, DateText(g_app.selected_date_key), RectF(width - 400.0f, 50, 330, 36), 13, C(76, 84, 77), FontStyleRegular, StringAlignmentFar);
+    Text(g, L"当日敲击", RectF(58, 122, 220, 66), 40, C(29, 34, 30), FontStyleBold);
     Text(g, FormatNumber(TotalCount()), RectF(280, 112, 330, 78), 58, C(47, 107, 77), FontStyleBold);
     Text(g, L"次", RectF(610, 122, 70, 66), 40, C(29, 34, 30), FontStyleBold);
     Pen divider(C(215, 221, 213));
     g.DrawLine(&divider, 720, 132, 720, 180);
     Text(g, L"峰值", RectF(760, 124, 80, 28), 13, C(83, 92, 84));
-    Text(g, std::to_wstring(PeakRate()) + L" 次/分", RectF(760, 151, 190, 34), 22, C(225, 124, 36), FontStyleBold);
+    Text(g, std::to_wstring(DayPeakRate()) + L" 次/分", RectF(760, 151, 190, 34), 22, C(225, 124, 36), FontStyleBold);
     g.DrawLine(&divider, 990, 132, 990, 180);
     Text(g, L"活跃", RectF(1030, 124, 80, 28), 13, C(83, 92, 84));
     Text(g, std::to_wstring(ActiveMinutes()) + L" 分钟", RectF(1030, 151, 220, 34), 22, C(47, 107, 77), FontStyleBold);
@@ -912,10 +1072,8 @@ int GetEncoderClsid(const WCHAR* format, CLSID* clsid) {
 
 bool ExportPng(HWND owner) {
     wchar_t file[MAX_PATH]{};
-    std::time_t now = std::time(nullptr);
-    std::tm local{};
-    localtime_s(&local, &now);
-    swprintf_s(file, L"KeyPulse-%04d-%02d-%02d.png", local.tm_year + 1900, local.tm_mon + 1, local.tm_mday);
+    SYSTEMTIME selected = DateKeyToSystemTime(g_app.selected_date_key);
+    swprintf_s(file, L"KeyPulse-%04d-%02d-%02d.png", selected.wYear, selected.wMonth, selected.wDay);
     OPENFILENAMEW dialog{};
     dialog.lStructSize = sizeof(dialog);
     dialog.hwndOwner = owner;
@@ -945,6 +1103,30 @@ void ShowMainWindow() {
     InvalidateRect(g_app.window, nullptr, FALSE);
 }
 
+void ShowCalendar() {
+    if (!g_app.calendar) return;
+    SYSTEMTIME selected = DateKeyToSystemTime(g_app.selected_date_key);
+    MonthCal_SetCurSel(g_app.calendar, &selected);
+    SYSTEMTIME range[2]{};
+    range[1] = DateKeyToSystemTime(TodayKey());
+    MonthCal_SetRange(g_app.calendar, GDTR_MAX, range);
+    RECT required{};
+    MonthCal_GetMinReqRect(g_app.calendar, &required);
+    RECT client{};
+    GetClientRect(g_app.window, &client);
+    int width = required.right - required.left + 6;
+    int height = required.bottom - required.top + 6;
+    int x = static_cast<int>(g_app.date_button.X + g_app.date_button.Width) - width;
+    int y = static_cast<int>(g_app.date_button.GetBottom()) + 6;
+    x = (std::max)(8, (std::min)(x, client.right - width - 8));
+    SetWindowPos(g_app.calendar, HWND_TOP, x, y, width, height, SWP_SHOWWINDOW);
+    SetFocus(g_app.calendar);
+}
+
+void HideCalendar() {
+    if (g_app.calendar) ShowWindow(g_app.calendar, SW_HIDE);
+}
+
 void UpdateTrayTip() {
     const wchar_t* tip = g_app.update_available ? L"KeyPulse · 有新版本可用" :
         (g_app.running ? L"KeyPulse · 正在记录" : L"KeyPulse · 已暂停");
@@ -960,11 +1142,19 @@ void ToggleRunning() {
 }
 
 void ResetToday(HWND owner) {
-    if (MessageBoxW(owner, L"确定清空今天的全部敲击统计吗？此操作无法撤销。", L"清空今日数据", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) == IDYES) {
+    std::wstring date = DateText(g_app.selected_date_key, false);
+    std::wstring message = L"确定清空 " + date + L" 的全部敲击统计吗？此操作无法撤销。";
+    if (MessageBoxW(owner, message.c_str(), L"清空当天数据", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) return;
+    if (ViewingToday()) {
         ResetForNewDay();
         SaveData();
-        InvalidateRect(g_app.window, nullptr, FALSE);
+    } else {
+        DeleteFileW(HistoryPath(g_app.selected_date_key).c_str());
+        g_app.history_counts.fill(0);
+        g_app.history_minutes.fill(0);
+        g_app.history_has_data = false;
     }
+    InvalidateRect(g_app.window, nullptr, FALSE);
 }
 
 UINT NormalizeRawKey(const RAWKEYBOARD& keyboard) {
@@ -998,6 +1188,7 @@ void RecordRawKey(const RAWKEYBOARD& keyboard) {
         g_app.minute_count[slot] = 0;
     }
     ++g_app.minute_count[slot];
+    ++g_app.day_minutes[static_cast<size_t>(CurrentMinuteOfDay())];
     g_app.dirty = true;
 }
 
@@ -1055,11 +1246,38 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
             MessageBoxW(window, L"无法注册 Windows Raw Input 键盘输入。", L"KeyPulse", MB_OK | MB_ICONERROR);
             return -1;
         }
+        g_app.calendar = CreateWindowExW(0, MONTHCAL_CLASSW, L"",
+            WS_CHILD | WS_BORDER | MCS_NOTODAY | MCS_NOTODAYCIRCLE,
+            0, 0, 0, 0, window, reinterpret_cast<HMENU>(2001), g_app.instance, nullptr);
+        if (g_app.calendar) {
+            g_app.calendar_font = CreateFontW(-16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
+            if (g_app.calendar_font) SendMessageW(g_app.calendar, WM_SETFONT,
+                reinterpret_cast<WPARAM>(g_app.calendar_font), TRUE);
+            MonthCal_SetColor(g_app.calendar, MCSC_BACKGROUND, RGB(245, 247, 245));
+            MonthCal_SetColor(g_app.calendar, MCSC_MONTHBK, RGB(255, 255, 253));
+            MonthCal_SetColor(g_app.calendar, MCSC_TEXT, RGB(45, 56, 45));
+            MonthCal_SetColor(g_app.calendar, MCSC_TITLEBK, RGB(47, 107, 77));
+            MonthCal_SetColor(g_app.calendar, MCSC_TITLETEXT, RGB(255, 255, 253));
+            MonthCal_SetColor(g_app.calendar, MCSC_TRAILINGTEXT, RGB(154, 163, 155));
+        }
         AddTrayIcon(window);
         SetTimer(window, TIMER_UI, 500, nullptr);
         SetTimer(window, TIMER_UPDATE, UPDATE_INTERVAL_MS, nullptr);
         StartUpdateCheck(window, true);
         return 0;
+    case WM_NOTIFY: {
+        auto* header = reinterpret_cast<NMHDR*>(lparam);
+        if (header && header->hwndFrom == g_app.calendar && header->code == MCN_SELECT) {
+            auto* selection = reinterpret_cast<NMSELCHANGE*>(lparam);
+            SelectDate(SystemTimeToDateKey(selection->stSelStart));
+            HideCalendar();
+            SetFocus(window);
+            return 0;
+        }
+        return DefWindowProcW(window, message, wparam, lparam);
+    }
     case WM_INPUT:
         HandleRawInput(lparam);
         return DefWindowProcW(window, message, wparam, lparam);
@@ -1124,6 +1342,11 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
     case WM_LBUTTONUP: {
         float x = static_cast<float>(GET_X_LPARAM(lparam));
         float y = static_cast<float>(GET_Y_LPARAM(lparam));
+        if (PointInside(g_app.date_button, x, y)) {
+            ShowCalendar();
+            return 0;
+        }
+        HideCalendar();
         if (PointInside(g_app.pause_button, x, y)) ToggleRunning();
         else if (PointInside(g_app.reset_button, x, y)) ResetToday(window);
         else if (PointInside(g_app.update_button, x, y)) {
@@ -1138,6 +1361,9 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         else for (const auto& item : g_app.key_hitboxes) if (PointInside(item.first, x, y)) { g_app.selected_vk = item.second; InvalidateRect(window, nullptr, FALSE); break; }
         return 0;
     }
+    case WM_SIZE:
+        HideCalendar();
+        return 0;
     case WM_GETMINMAXINFO: {
         auto* info = reinterpret_cast<MINMAXINFO*>(lparam);
         info->ptMinTrackSize.x = 1160;
@@ -1187,6 +1413,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         KillTimer(window, TIMER_UPDATE);
         SaveData();
         Shell_NotifyIconW(NIM_DELETE, &g_app.tray);
+        if (g_app.calendar_font) DeleteObject(g_app.calendar_font);
         PostQuitMessage(0);
         return 0;
     default:
@@ -1214,6 +1441,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show_command) {
     }
     SetProcessDPIAware();
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_DATE_CLASSES};
+    InitCommonControlsEx(&controls);
     GdiplusStartupInput gdiplus_input;
     GdiplusStartup(&g_app.gdiplus_token, &gdiplus_input, nullptr);
     g_app.instance = instance;
@@ -1231,7 +1460,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show_command) {
     RECT desired{0, 0, 1360, 880};
     AdjustWindowRectEx(&desired, WS_OVERLAPPEDWINDOW, FALSE, 0);
     int screen_w = GetSystemMetrics(SM_CXSCREEN), screen_h = GetSystemMetrics(SM_CYSCREEN);
-    g_app.window = CreateWindowExW(0, kWindowClass, kAppName, WS_OVERLAPPEDWINDOW,
+    g_app.window = CreateWindowExW(0, kWindowClass, kAppName, WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
         (screen_w - (desired.right - desired.left)) / 2, (screen_h - (desired.bottom - desired.top)) / 2,
         desired.right - desired.left, desired.bottom - desired.top, nullptr, nullptr, instance, nullptr);
     if (!g_app.window) return 1;
