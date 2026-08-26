@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <memory>
 #include <numeric>
 #include <stdexcept>
@@ -28,7 +29,7 @@ namespace fs = std::filesystem;
 namespace {
 constexpr wchar_t kWindowClass[] = L"KeyPulseNativeWindow";
 constexpr wchar_t kAppName[] = L"KeyPulse";
-constexpr wchar_t kAppVersion[] = L"0.2.2";
+constexpr wchar_t kAppVersion[] = L"0.2.3";
 constexpr wchar_t kLatestReleaseApi[] = L"https://api.github.com/repos/tangyuanx/KeyPulse/releases/latest";
 constexpr UINT WM_TRAYICON = WM_APP + 1;
 constexpr UINT WM_UPDATE_RESULT = WM_APP + 2;
@@ -261,8 +262,9 @@ std::wstring Utf8ToWide(const std::string& text) {
     return result;
 }
 
-bool HttpGet(const std::wstring& url, std::vector<unsigned char>& body, std::wstring& error,
-             size_t maximum_bytes = 100 * 1024 * 1024) {
+bool HttpGetOnce(const std::wstring& url, std::vector<unsigned char>& body, std::wstring& error,
+                 size_t maximum_bytes, DWORD access_type, DWORD& winhttp_error) {
+    winhttp_error = ERROR_SUCCESS;
     URL_COMPONENTS parts{};
     parts.dwStructSize = sizeof(parts);
     parts.dwSchemeLength = static_cast<DWORD>(-1);
@@ -270,42 +272,56 @@ bool HttpGet(const std::wstring& url, std::vector<unsigned char>& body, std::wst
     parts.dwUrlPathLength = static_cast<DWORD>(-1);
     parts.dwExtraInfoLength = static_cast<DWORD>(-1);
     if (!WinHttpCrackUrl(url.c_str(), 0, 0, &parts)) {
-        error = L"无法解析更新地址，错误代码 " + std::to_wstring(GetLastError());
+        winhttp_error = GetLastError();
+        error = L"无法解析更新地址，错误代码 " + std::to_wstring(winhttp_error);
         return false;
     }
     std::wstring host(parts.lpszHostName, parts.dwHostNameLength);
     std::wstring path(parts.lpszUrlPath, parts.dwUrlPathLength);
     if (parts.dwExtraInfoLength > 0) path.append(parts.lpszExtraInfo, parts.dwExtraInfoLength);
     std::wstring user_agent = std::wstring(L"KeyPulse/") + kAppVersion;
-    WinHttpHandle session(WinHttpOpen(user_agent.c_str(), WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+    WinHttpHandle session(WinHttpOpen(user_agent.c_str(), access_type,
         WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0));
     if (!session) {
-        error = L"无法初始化网络连接，错误代码 " + std::to_wstring(GetLastError());
+        winhttp_error = GetLastError();
+        error = L"无法初始化网络连接，错误代码 " + std::to_wstring(winhttp_error);
         return false;
     }
-    WinHttpSetTimeouts(session, 5000, 5000, 10000, 30000);
+    WinHttpSetTimeouts(session, 10000, 15000, 30000, 60000);
     WinHttpHandle connection(WinHttpConnect(session, host.c_str(), parts.nPort, 0));
     if (!connection) {
-        error = L"无法连接 GitHub，错误代码 " + std::to_wstring(GetLastError());
+        winhttp_error = GetLastError();
+        error = L"无法连接 GitHub，错误代码 " + std::to_wstring(winhttp_error);
         return false;
     }
     DWORD flags = parts.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0;
     WinHttpHandle request(WinHttpOpenRequest(connection, L"GET", path.c_str(), nullptr,
         WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, flags));
     if (!request) {
-        error = L"无法创建更新请求，错误代码 " + std::to_wstring(GetLastError());
+        winhttp_error = GetLastError();
+        error = L"无法创建更新请求，错误代码 " + std::to_wstring(winhttp_error);
         return false;
     }
+    DWORD redirect_policy = WINHTTP_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP;
+    WinHttpSetOption(request, WINHTTP_OPTION_REDIRECT_POLICY, &redirect_policy, sizeof(redirect_policy));
     const wchar_t headers[] = L"Accept: application/vnd.github+json\r\nX-GitHub-Api-Version: 2022-11-28\r\n";
-    if (!WinHttpSendRequest(request, headers, static_cast<DWORD>(-1), WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
-        !WinHttpReceiveResponse(request, nullptr)) {
-        error = L"GitHub 请求失败，错误代码 " + std::to_wstring(GetLastError());
+    if (!WinHttpSendRequest(request, headers, static_cast<DWORD>(-1), WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) {
+        winhttp_error = GetLastError();
+        error = L"发送 GitHub 请求失败，错误代码 " + std::to_wstring(winhttp_error);
+        return false;
+    }
+    if (!WinHttpReceiveResponse(request, nullptr)) {
+        winhttp_error = GetLastError();
+        error = L"等待 GitHub 响应失败，错误代码 " + std::to_wstring(winhttp_error);
         return false;
     }
     DWORD status = 0, status_size = sizeof(status);
     if (!WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
         WINHTTP_HEADER_NAME_BY_INDEX, &status, &status_size, WINHTTP_NO_HEADER_INDEX) || status != 200) {
         error = L"GitHub 返回状态码 " + std::to_wstring(status);
+        if (status == 408 || status == 429 || status == 500 || status == 502 || status == 503 || status == 504) {
+            winhttp_error = ERROR_WINHTTP_INVALID_SERVER_RESPONSE;
+        }
         return false;
     }
     body.clear();
@@ -313,7 +329,8 @@ bool HttpGet(const std::wstring& url, std::vector<unsigned char>& body, std::wst
     while (true) {
         DWORD bytes_read = 0;
         if (!WinHttpReadData(request, buffer.data(), static_cast<DWORD>(buffer.size()), &bytes_read)) {
-            error = L"读取更新数据失败，错误代码 " + std::to_wstring(GetLastError());
+            winhttp_error = GetLastError();
+            error = L"读取更新数据失败，错误代码 " + std::to_wstring(winhttp_error);
             return false;
         }
         if (bytes_read == 0) break;
@@ -324,6 +341,35 @@ bool HttpGet(const std::wstring& url, std::vector<unsigned char>& body, std::wst
         body.insert(body.end(), buffer.begin(), buffer.begin() + bytes_read);
     }
     return true;
+}
+
+bool IsRetryableWinHttpError(DWORD error) {
+    return error == ERROR_WINHTTP_TIMEOUT || error == ERROR_WINHTTP_NAME_NOT_RESOLVED ||
+        error == ERROR_WINHTTP_CANNOT_CONNECT || error == ERROR_WINHTTP_CONNECTION_ERROR ||
+        error == ERROR_WINHTTP_RESEND_REQUEST || error == ERROR_WINHTTP_INVALID_SERVER_RESPONSE ||
+        error == ERROR_WINHTTP_AUTO_PROXY_SERVICE_ERROR || error == ERROR_WINHTTP_UNABLE_TO_DOWNLOAD_SCRIPT;
+}
+
+bool HttpGet(const std::wstring& url, std::vector<unsigned char>& body, std::wstring& error,
+             size_t maximum_bytes = 100 * 1024 * 1024) {
+    constexpr DWORD access_types[] = {
+        WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+        WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+        WINHTTP_ACCESS_TYPE_NO_PROXY
+    };
+    DWORD last_error = ERROR_SUCCESS;
+    for (size_t attempt = 0; attempt < std::size(access_types); ++attempt) {
+        body.clear();
+        if (HttpGetOnce(url, body, error, maximum_bytes, access_types[attempt], last_error)) return true;
+        if (!IsRetryableWinHttpError(last_error)) return false;
+        if (attempt + 1 < std::size(access_types)) Sleep(attempt == 0 ? 700 : 1800);
+    }
+    if (last_error == ERROR_WINHTTP_TIMEOUT) {
+        error = L"连接 GitHub 超时，已使用三种网络方式重试。请检查代理、VPN 或防火墙设置（错误代码 12002）。";
+    } else {
+        error += L"，已自动重试三次";
+    }
+    return false;
 }
 
 bool FindJsonString(const std::string& json, const std::string& key, size_t start,
