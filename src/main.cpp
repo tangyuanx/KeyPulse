@@ -126,7 +126,11 @@ void StrokeRound(Graphics& g, const RectF& r, float radius, const Color& color, 
 void Text(Graphics& g, const std::wstring& text, const RectF& rect, float size, const Color& color,
           FontStyle style = FontStyleRegular, StringAlignment align = StringAlignmentNear,
           const wchar_t* family_name = L"Microsoft YaHei UI") {
-    FontFamily family(family_name);
+    // Keep the entire interface on one predictable Chinese UI typeface.
+    // The parameter remains for source compatibility, but intentional font
+    // mixing is disabled because it makes Chinese and numbers feel unrelated.
+    (void)family_name;
+    FontFamily family(L"Microsoft YaHei UI");
     Font font(&family, size, style, UnitPixel);
     SolidBrush brush(color);
     StringFormat format;
@@ -138,12 +142,12 @@ void Text(Graphics& g, const std::wstring& text, const RectF& rect, float size, 
 
 std::vector<std::vector<KeyDef>> KeyboardRows() {
     return {
-        {{L"Esc",VK_ESCAPE,1},{L"F1",VK_F1,1},{L"F2",VK_F2,1},{L"F3",VK_F3,1},{L"F4",VK_F4,1},{L"F5",VK_F5,1},{L"F6",VK_F6,1},{L"F7",VK_F7,1},{L"F8",VK_F8,1},{L"F9",VK_F9,1},{L"F10",VK_F10,1},{L"F11",VK_F11,1},{L"F12",VK_F12,1},{L"Del",VK_DELETE,1}},
-        {{L"`",VK_OEM_3,1},{L"1",'1',1},{L"2",'2',1},{L"3",'3',1},{L"4",'4',1},{L"5",'5',1},{L"6",'6',1},{L"7",'7',1},{L"8",'8',1},{L"9",'9',1},{L"0",'0',1},{L"-",VK_OEM_MINUS,1},{L"=",VK_OEM_PLUS,1},{L"Backspace",VK_BACK,2}},
-        {{L"Tab",VK_TAB,1.5f},{L"Q",'Q',1},{L"W",'W',1},{L"E",'E',1},{L"R",'R',1},{L"T",'T',1},{L"Y",'Y',1},{L"U",'U',1},{L"I",'I',1},{L"O",'O',1},{L"P",'P',1},{L"[",VK_OEM_4,1},{L"]",VK_OEM_6,1},{L"\\",VK_OEM_5,1.5f}},
-        {{L"Caps",VK_CAPITAL,1.8f},{L"A",'A',1},{L"S",'S',1},{L"D",'D',1},{L"F",'F',1},{L"G",'G',1},{L"H",'H',1},{L"J",'J',1},{L"K",'K',1},{L"L",'L',1},{L";",VK_OEM_1,1},{L"'",VK_OEM_7,1},{L"Enter",VK_RETURN,2.2f}},
-        {{L"Shift",VK_LSHIFT,2.3f},{L"Z",'Z',1},{L"X",'X',1},{L"C",'C',1},{L"V",'V',1},{L"B",'B',1},{L"N",'N',1},{L"M",'M',1},{L",",VK_OEM_COMMA,1},{L".",VK_OEM_PERIOD,1},{L"/",VK_OEM_2,1},{L"Shift",VK_RSHIFT,2.7f}},
-        {{L"Ctrl",VK_LCONTROL,1.4f},{L"Win",VK_LWIN,1.2f},{L"Alt",VK_LMENU,1.2f},{L"Space",VK_SPACE,6.4f},{L"Alt",VK_RMENU,1.2f},{L"Ctrl",VK_RCONTROL,1.4f},{L"←",VK_LEFT,1},{L"↑",VK_UP,1},{L"↓",VK_DOWN,1},{L"→",VK_RIGHT,1}}
+        {{L"Esc",VK_ESCAPE,1},{L"",0,.35f},{L"F1",VK_F1,1},{L"F2",VK_F2,1},{L"F3",VK_F3,1},{L"F4",VK_F4,1},{L"",0,.35f},{L"F5",VK_F5,1},{L"F6",VK_F6,1},{L"F7",VK_F7,1},{L"F8",VK_F8,1},{L"",0,.35f},{L"F9",VK_F9,1},{L"F10",VK_F10,1},{L"F11",VK_F11,1},{L"F12",VK_F12,1},{L"",0,.35f},{L"PrtSc",VK_SNAPSHOT,1},{L"ScrLk",VK_SCROLL,1},{L"Pause",VK_PAUSE,1}},
+        {{L"`",VK_OEM_3,1},{L"1",'1',1},{L"2",'2',1},{L"3",'3',1},{L"4",'4',1},{L"5",'5',1},{L"6",'6',1},{L"7",'7',1},{L"8",'8',1},{L"9",'9',1},{L"0",'0',1},{L"-",VK_OEM_MINUS,1},{L"=",VK_OEM_PLUS,1},{L"Backspace",VK_BACK,2},{L"",0,.35f},{L"Ins",VK_INSERT,1},{L"Home",VK_HOME,1},{L"PgUp",VK_PRIOR,1},{L"",0,.35f},{L"Num",VK_NUMLOCK,1},{L"/",VK_DIVIDE,1},{L"*",VK_MULTIPLY,1},{L"-",VK_SUBTRACT,1}},
+        {{L"Tab",VK_TAB,1.5f},{L"Q",'Q',1},{L"W",'W',1},{L"E",'E',1},{L"R",'R',1},{L"T",'T',1},{L"Y",'Y',1},{L"U",'U',1},{L"I",'I',1},{L"O",'O',1},{L"P",'P',1},{L"[",VK_OEM_4,1},{L"]",VK_OEM_6,1},{L"\\",VK_OEM_5,1.5f},{L"",0,.35f},{L"Del",VK_DELETE,1},{L"End",VK_END,1},{L"PgDn",VK_NEXT,1},{L"",0,.35f},{L"7",VK_NUMPAD7,1},{L"8",VK_NUMPAD8,1},{L"9",VK_NUMPAD9,1},{L"+",VK_ADD,1}},
+        {{L"Caps",VK_CAPITAL,1.8f},{L"A",'A',1},{L"S",'S',1},{L"D",'D',1},{L"F",'F',1},{L"G",'G',1},{L"H",'H',1},{L"J",'J',1},{L"K",'K',1},{L"L",'L',1},{L";",VK_OEM_1,1},{L"'",VK_OEM_7,1},{L"Enter",VK_RETURN,2.2f},{L"",0,.35f},{L"",0,3.35f},{L"",0,.35f},{L"4",VK_NUMPAD4,1},{L"5",VK_NUMPAD5,1},{L"6",VK_NUMPAD6,1},{L"+",VK_ADD,1}},
+        {{L"Shift",VK_LSHIFT,2.3f},{L"Z",'Z',1},{L"X",'X',1},{L"C",'C',1},{L"V",'V',1},{L"B",'B',1},{L"N",'N',1},{L"M",'M',1},{L",",VK_OEM_COMMA,1},{L".",VK_OEM_PERIOD,1},{L"/",VK_OEM_2,1},{L"Shift",VK_RSHIFT,2.7f},{L"",0,.35f},{L"",0,1},{L"↑",VK_UP,1},{L"",0,1},{L"",0,.35f},{L"1",VK_NUMPAD1,1},{L"2",VK_NUMPAD2,1},{L"3",VK_NUMPAD3,1},{L"Enter",VK_RETURN,1}},
+        {{L"Ctrl",VK_LCONTROL,1.4f},{L"Win",VK_LWIN,1.2f},{L"Alt",VK_LMENU,1.2f},{L"Space",VK_SPACE,6.4f},{L"Alt",VK_RMENU,1.2f},{L"Win",VK_RWIN,1.2f},{L"Menu",VK_APPS,1.2f},{L"Ctrl",VK_RCONTROL,1.4f},{L"",0,.35f},{L"←",VK_LEFT,1},{L"↓",VK_DOWN,1},{L"→",VK_RIGHT,1},{L"",0,.35f},{L"0",VK_NUMPAD0,2.05f},{L".",VK_DECIMAL,1},{L"Enter",VK_RETURN,1}}
     };
 }
 
@@ -167,6 +171,15 @@ uint32_t PeakRate() {
     int64_t now = EpochMinute();
     for (size_t i = 0; i < 60; ++i) if (g_app.minute_stamp[i] > now - 60) peak = (std::max)(peak, g_app.minute_count[i]);
     return peak;
+}
+
+uint32_t ActiveMinutes() {
+    uint32_t active = 0;
+    int64_t now = EpochMinute();
+    for (size_t i = 0; i < 60; ++i) {
+        if (g_app.minute_stamp[i] > now - 60 && g_app.minute_count[i] > 0) ++active;
+    }
+    return active;
 }
 
 void ResetForNewDay() {
@@ -233,25 +246,20 @@ void LoadData() {
 }
 
 Color HeatColor(uint64_t value, uint64_t maximum) {
-    if (value == 0 || maximum == 0) return C(47, 58, 47);
+    if (value == 0 || maximum == 0) return C(249, 250, 247);
     float p = static_cast<float>(value) / static_cast<float>(maximum);
-    if (p > .72f) return C(202, 240, 106);
-    if (p > .45f) return C(158, 201, 93);
-    if (p > .25f) return C(119, 157, 81);
-    if (p > .10f) return C(88, 116, 72);
-    return C(65, 81, 58);
+    if (p > .72f) return C(49, 118, 78);
+    if (p > .45f) return C(104, 158, 106);
+    if (p > .25f) return C(151, 190, 143);
+    if (p > .10f) return C(196, 217, 188);
+    return C(226, 236, 220);
 }
 
 void DrawStatCard(Graphics& g, float x, float y, float w, const std::wstring& label,
                   const std::wstring& value, const std::wstring& note, const Color& accent) {
-    RectF card(x, y, w, 110);
-    FillRound(g, card, 12, C(251, 252, 248));
-    StrokeRound(g, card, 12, C(222, 229, 220));
-    FillRound(g, RectF(x + w - 48, y + 14, 32, 32), 8, Color(35, accent.GetR(), accent.GetG(), accent.GetB()));
-    Text(g, L"●", RectF(x + w - 48, y + 14, 32, 32), 12, accent, FontStyleBold, StringAlignmentCenter);
-    Text(g, label, RectF(x + 16, y + 13, w - 70, 20), 11, C(111, 122, 112));
-    Text(g, value, RectF(x + 16, y + 38, w - 32, 34), 25, C(27, 35, 27), FontStyleBold, StringAlignmentNear, L"Georgia");
-    Text(g, note, RectF(x + 16, y + 78, w - 32, 18), 9, C(145, 154, 146));
+    Text(g, label, RectF(x + 22, y + 12, w - 44, 20), 11, C(76, 84, 77));
+    Text(g, value, RectF(x + 22, y + 34, w - 44, 32), 23, accent, FontStyleBold);
+    Text(g, note, RectF(x + 22, y + 70, w - 44, 17), 9, C(133, 141, 134));
 }
 
 void DrawButton(Graphics& g, const RectF& r, const std::wstring& label, bool primary = false) {
@@ -261,7 +269,8 @@ void DrawButton(Graphics& g, const RectF& r, const std::wstring& label, bool pri
 }
 
 void DrawKeyboard(Graphics& g, const RectF& bounds, bool register_hits) {
-    FillRound(g, bounds, 12, C(31, 40, 31));
+    FillRound(g, bounds, 8, C(245, 247, 243));
+    StrokeRound(g, bounds, 8, C(218, 224, 216));
     auto rows = KeyboardRows();
     uint64_t maximum = *std::max_element(g_app.counts.begin(), g_app.counts.end());
     const float pad = 11.0f, gap = 5.0f;
@@ -276,14 +285,19 @@ void DrawKeyboard(Graphics& g, const RectF& bounds, bool register_hits) {
         float y = bounds.Y + pad + static_cast<float>(ri) * (row_h + gap);
         for (const auto& key : row) {
             RectF r(x, y, unit * key.units, row_h);
+            if (key.vk == 0) {
+                x += r.Width + gap;
+                continue;
+            }
             Color fill = HeatColor(g_app.counts[key.vk], maximum);
-            FillRound(g, r, 5, fill);
-            StrokeRound(g, r, 5, key.vk == g_app.selected_vk ? C(218, 255, 128) : C(72, 84, 70));
-            bool bright = g_app.counts[key.vk] > maximum / 4 && maximum > 0;
+            FillRound(g, r, 4, fill);
+            bool bright = g_app.counts[key.vk] > maximum * 45 / 100 && maximum > 0;
+            bool selected = register_hits && key.vk == g_app.selected_vk;
+            StrokeRound(g, r, 4, selected ? C(34, 103, 68) : C(204, 211, 202), selected ? 2.0f : 1.0f);
             Text(g, key.label, RectF(r.X + 6, r.Y + 3, r.Width - 12, r.Height * .46f), r.Width < 42 ? 8 : 9,
-                 bright ? C(22, 31, 20) : C(218, 225, 215), FontStyleRegular);
+                 bright ? C(255, 255, 253) : C(39, 46, 40), FontStyleRegular);
             if (g_app.counts[key.vk] > 0) Text(g, FormatNumber(g_app.counts[key.vk]), RectF(r.X + 6, r.Y + r.Height * .48f, r.Width - 12, r.Height * .40f), 7,
-                 bright ? C(57, 75, 47) : C(162, 174, 159));
+                 bright ? C(226, 240, 229) : C(115, 126, 116));
             if (register_hits) g_app.key_hitboxes.emplace_back(r, key.vk);
             x += r.Width + gap;
         }
@@ -299,130 +313,153 @@ std::vector<std::pair<UINT, uint64_t>> TopKeys(size_t count) {
 }
 
 void DrawRankPanel(Graphics& g, const RectF& panel) {
-    FillRound(g, panel, 12, C(251, 252, 248));
-    StrokeRound(g, panel, 12, C(222, 229, 220));
+    FillRound(g, panel, 8, C(255, 255, 253));
+    StrokeRound(g, panel, 8, C(216, 222, 214));
     Text(g, L"高频按键", RectF(panel.X + 16, panel.Y + 12, panel.Width - 32, 24), 13, C(30, 39, 30), FontStyleBold);
-    Text(g, L"今日 Top 5", RectF(panel.X + 16, panel.Y + 35, panel.Width - 32, 18), 9, C(148, 156, 148));
-    auto top = TopKeys(5);
-    uint64_t maximum = top.empty() ? 1 : top.front().second;
-    for (size_t i = 0; i < 5; ++i) {
-        float y = panel.Y + 62 + static_cast<float>(i) * 55;
-        Pen line(C(235, 239, 233));
-        g.DrawLine(&line, panel.X + 14, y, panel.GetRight() - 14, y);
+    Text(g, L"#", RectF(panel.X + 16, panel.Y + 43, 26, 20), 9, C(132, 140, 133));
+    Text(g, L"按键", RectF(panel.X + 48, panel.Y + 43, 72, 20), 9, C(132, 140, 133));
+    Text(g, L"次数", RectF(panel.X + 122, panel.Y + 43, panel.Width - 138, 20), 9, C(132, 140, 133), FontStyleRegular, StringAlignmentFar);
+    Pen line(C(229, 233, 227));
+    g.DrawLine(&line, panel.X + 14, panel.Y + 66, panel.GetRight() - 14, panel.Y + 66);
+    auto top = TopKeys(10);
+    for (size_t i = 0; i < 10; ++i) {
+        float y = panel.Y + 70 + static_cast<float>(i) * 30;
         if (i >= top.size()) continue;
-        Text(g, L"0" + std::to_wstring(i + 1), RectF(panel.X + 15, y + 8, 24, 30), 8, C(160, 168, 160));
-        RectF key_rect(panel.X + 42, y + 11, 34, 28);
-        FillRound(g, key_rect, 5, C(34, 44, 33));
-        Text(g, KeyLabel(top[i].first), key_rect, 9, C(231, 238, 227), FontStyleBold, StringAlignmentCenter);
-        Text(g, FormatNumber(top[i].second), RectF(panel.X + 87, y + 4, panel.Width - 104, 24), 12, C(35, 44, 35), FontStyleBold);
-        RectF track(panel.X + 87, y + 33, panel.Width - 104, 4);
-        FillRound(g, track, 2, C(228, 233, 226));
-        FillRound(g, RectF(track.X, track.Y, track.Width * static_cast<float>(top[i].second) / static_cast<float>(maximum), 4), 2, C(126, 174, 84));
+        Color strong = i < 3 ? C(47, 107, 77) : C(65, 74, 66);
+        Text(g, std::to_wstring(i + 1), RectF(panel.X + 16, y, 26, 25), 9, C(136, 144, 137));
+        Text(g, KeyLabel(top[i].first), RectF(panel.X + 48, y, 74, 25), 10, strong, i < 3 ? FontStyleBold : FontStyleRegular);
+        Text(g, FormatNumber(top[i].second), RectF(panel.X + 122, y, panel.Width - 138, 25), 10, strong, i < 3 ? FontStyleBold : FontStyleRegular, StringAlignmentFar);
     }
 }
 
 void DrawChart(Graphics& g, const RectF& panel) {
-    FillRound(g, panel, 12, C(251, 252, 248));
-    StrokeRound(g, panel, 12, C(222, 229, 220));
+    FillRound(g, panel, 8, C(255, 255, 253));
+    StrokeRound(g, panel, 8, C(216, 222, 214));
     Text(g, L"最近 60 分钟", RectF(panel.X + 16, panel.Y + 10, 150, 22), 12, C(30, 39, 30), FontStyleBold);
     Text(g, L"每分钟敲击次数", RectF(panel.X + 16, panel.Y + 32, 150, 16), 8, C(148, 156, 148));
     RectF chart(panel.X + 170, panel.Y + 14, panel.Width - 188, panel.Height - 26);
     uint32_t peak = (std::max)(PeakRate(), 1u);
     int64_t now = EpochMinute();
-    float gap = 2.0f;
-    float bar_w = (chart.Width - gap * 59) / 60.0f;
     Pen grid(C(232, 236, 230));
     for (int i = 0; i < 3; ++i) {
         float y = chart.Y + chart.Height * static_cast<float>(i) / 2.0f;
         g.DrawLine(&grid, chart.X, y, chart.GetRight(), y);
     }
+    std::vector<PointF> points;
+    points.reserve(60);
     for (int i = 0; i < 60; ++i) {
         int64_t stamp = now - 59 + i;
         size_t slot = static_cast<size_t>(stamp % 60);
         uint32_t value = g_app.minute_stamp[slot] == stamp ? g_app.minute_count[slot] : 0;
-        float h = chart.Height * static_cast<float>(value) / static_cast<float>(peak);
-        RectF bar(chart.X + i * (bar_w + gap), chart.GetBottom() - h, bar_w, h);
-        SolidBrush brush(i == 59 ? C(50, 111, 76) : C(153, 190, 112));
-        g.FillRectangle(&brush, bar);
+        float x = chart.X + chart.Width * static_cast<float>(i) / 59.0f;
+        float y = chart.GetBottom() - chart.Height * static_cast<float>(value) / static_cast<float>(peak);
+        points.emplace_back(x, y);
+    }
+    if (points.size() > 1) {
+        Pen line(C(47, 107, 77), 2.2f);
+        line.SetLineJoin(LineJoinRound);
+        g.DrawLines(&line, points.data(), static_cast<INT>(points.size()));
+        SolidBrush dot(C(47, 107, 77));
+        g.FillEllipse(&dot, points.back().X - 3, points.back().Y - 3, 6, 6);
     }
 }
 
 void DrawDashboard(Graphics& g, int width, int height) {
     g.SetSmoothingMode(SmoothingModeAntiAlias);
     g.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
-    g.Clear(C(244, 246, 241));
-    SolidBrush nav(C(251, 252, 248));
+    g.Clear(C(245, 247, 245));
+    SolidBrush nav(C(255, 255, 253));
     g.FillRectangle(&nav, 0, 0, width, 68);
     Pen nav_line(C(222, 228, 220));
     g.DrawLine(&nav_line, 0, 67, width, 67);
-    FillRound(g, RectF(28, 16, 36, 36), 9, C(27, 36, 27));
-    Text(g, L"K", RectF(28, 16, 36, 36), 17, C(202, 240, 106), FontStyleBold, StringAlignmentCenter, L"Segoe UI");
+    FillRound(g, RectF(28, 16, 36, 36), 8, C(47, 107, 77));
+    Text(g, L"K", RectF(28, 16, 36, 36), 17, C(255, 255, 253), FontStyleBold, StringAlignmentCenter);
     Text(g, L"KeyPulse", RectF(74, 14, 150, 22), 16, C(27, 35, 27), FontStyleBold);
     Text(g, L"输入节奏仪表盘", RectF(74, 35, 150, 16), 9, C(118, 128, 119));
     float right = static_cast<float>(width) - 28;
     g_app.export_button = RectF(right - 104, 17, 104, 34);
-    g_app.pause_button = RectF(right - 196, 17, 82, 34);
-    g_app.reset_button = RectF(right - 278, 17, 72, 34);
-    DrawButton(g, g_app.reset_button, L"清空");
-    DrawButton(g, g_app.pause_button, g_app.running ? L"暂停" : L"继续", true);
-    DrawButton(g, g_app.export_button, L"导出 PNG");
+    g_app.pause_button = RectF(right - 214, 17, 100, 34);
+    g_app.reset_button = RectF(right - 308, 17, 84, 34);
+    DrawButton(g, g_app.reset_button, L"清空数据");
+    DrawButton(g, g_app.pause_button, g_app.running ? L"暂停记录" : L"继续记录", true);
+    DrawButton(g, g_app.export_button, L"导出图片");
     float content_w = static_cast<float>(width) - 56;
-    Text(g, L"DAILY OVERVIEW", RectF(28, 86, 200, 16), 9, C(108, 124, 104), FontStyleBold);
-    Text(g, L"今天，手指走了多远？", RectF(28, 103, 430, 40), 27, C(28, 36, 28), FontStyleRegular, StringAlignmentNear, L"Georgia");
-    Text(g, L"所有数据仅在本机聚合，不记录输入内容与顺序。", RectF(28, 141, 460, 22), 11, C(117, 128, 118));
-    Text(g, TodayText(), RectF(static_cast<float>(width) - 280, 110, 252, 24), 10, C(116, 126, 117), FontStyleRegular, StringAlignmentFar);
-    float cards_y = 177, cards_gap = 12;
-    float card_w = (content_w - cards_gap * 3) / 4;
-    DrawStatCard(g, 28, cards_y, card_w, L"今日总敲击", FormatNumber(TotalCount()), g_app.running ? L"正在实时记录" : L"记录已暂停", C(76, 129, 83));
-    DrawStatCard(g, 28 + (card_w + cards_gap), cards_y, card_w, L"当前速度", std::to_wstring(CurrentRate()) + L" 次/分钟", L"当前分钟累计", C(173, 126, 40));
-    DrawStatCard(g, 28 + (card_w + cards_gap) * 2, cards_y, card_w, L"近一小时峰值", std::to_wstring(PeakRate()) + L" 次/分钟", L"自动滚动统计", C(75, 122, 133));
-    DrawStatCard(g, 28 + (card_w + cards_gap) * 3, cards_y, card_w, L"本地隐私模式", L"已开启", L"无网络 · 15 秒批量保存", C(74, 139, 92));
-    float main_y = 301;
-    float rank_w = 244;
+    Text(g, L"键盘敲击统计", RectF(28, 83, 330, 38), 27, C(25, 31, 26), FontStyleBold);
+    Text(g, L"查看今天的输入节奏与按键分布", RectF(28, 121, 380, 22), 11, C(111, 120, 112));
+    Text(g, L"仅统计次数，不记录输入内容", RectF(static_cast<float>(width) - 360, 86, 332, 24), 11, C(83, 99, 85), FontStyleRegular, StringAlignmentFar);
+    Text(g, TodayText(), RectF(static_cast<float>(width) - 360, 114, 332, 20), 9, C(139, 147, 140), FontStyleRegular, StringAlignmentFar);
+    float cards_y = 156;
+    float card_w = content_w / 4;
+    RectF metric_strip(28, cards_y, content_w, 102);
+    FillRound(g, metric_strip, 8, C(255, 255, 253));
+    StrokeRound(g, metric_strip, 8, C(210, 217, 208));
+    Pen metric_divider(C(216, 222, 214));
+    for (int i = 1; i < 4; ++i) {
+        float divider_x = metric_strip.X + card_w * static_cast<float>(i);
+        g.DrawLine(&metric_divider, divider_x, cards_y + 18, divider_x, cards_y + 84);
+    }
+    DrawStatCard(g, 28, cards_y, card_w, L"今日敲击", FormatNumber(TotalCount()) + L" 次", g_app.running ? L"正在实时记录" : L"记录已暂停", C(47, 107, 77));
+    DrawStatCard(g, 28 + card_w, cards_y, card_w, L"当前速度", std::to_wstring(CurrentRate()) + L" 次/分", L"当前分钟累计", C(47, 107, 77));
+    DrawStatCard(g, 28 + card_w * 2, cards_y, card_w, L"峰值速度", std::to_wstring(PeakRate()) + L" 次/分", L"最近 60 分钟", C(225, 124, 36));
+    DrawStatCard(g, 28 + card_w * 3, cards_y, card_w, L"活跃时间", std::to_wstring(ActiveMinutes()) + L" 分钟", L"最近 60 分钟", C(47, 107, 77));
+    float main_y = 272;
+    float rank_w = 252;
     float keyboard_w = content_w - rank_w - 12;
-    RectF keyboard_panel(28, main_y, keyboard_w, 374);
-    FillRound(g, keyboard_panel, 12, C(251, 252, 248));
-    StrokeRound(g, keyboard_panel, 12, C(222, 229, 220));
+    RectF keyboard_panel(28, main_y, keyboard_w, 398);
+    FillRound(g, keyboard_panel, 8, C(255, 255, 253));
+    StrokeRound(g, keyboard_panel, 8, C(216, 222, 214));
     Text(g, L"键盘热力图", RectF(44, main_y + 10, 200, 23), 13, C(30, 39, 30), FontStyleBold);
     Text(g, L"颜色越亮，敲击越频繁 · 点击按键查看详情", RectF(44, main_y + 32, 300, 17), 9, C(148, 156, 148));
-    RectF keyboard(43, main_y + 58, keyboard_w - 30, 258);
+    RectF keyboard(43, main_y + 56, keyboard_w - 30, 284);
     DrawKeyboard(g, keyboard, true);
-    RectF selected(43, main_y + 328, keyboard_w - 30, 32);
+    RectF selected(43, main_y + 352, keyboard_w - 30, 32);
     FillRound(g, selected, 7, C(240, 243, 237));
     Text(g, L"已选按键", RectF(selected.X + 10, selected.Y, 62, selected.Height), 8, C(135, 144, 136));
     RectF selected_key(selected.X + 75, selected.Y + 5, 48, 22);
-    FillRound(g, selected_key, 5, C(35, 45, 34));
+    FillRound(g, selected_key, 4, C(35, 45, 34));
     Text(g, KeyLabel(g_app.selected_vk), selected_key, 8, C(232, 239, 228), FontStyleBold, StringAlignmentCenter);
     Text(g, FormatNumber(g_app.counts[g_app.selected_vk]) + L" 次敲击", RectF(selected.X + 134, selected.Y, 150, selected.Height), 10, C(45, 56, 45), FontStyleBold);
-    DrawRankPanel(g, RectF(28 + keyboard_w + 12, main_y, rank_w, 374));
-    if (height > 760) DrawChart(g, RectF(28, 688, content_w, static_cast<float>(height) - 716));
+    DrawRankPanel(g, RectF(28 + keyboard_w + 12, main_y, rank_w, 398));
+    if (height > 780) DrawChart(g, RectF(28, 684, content_w, static_cast<float>(height) - 712));
 }
 
 void DrawShareCard(Graphics& g, int width, int height) {
     g.SetSmoothingMode(SmoothingModeAntiAlias);
     g.SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
-    g.Clear(C(244, 246, 241));
-    FillRound(g, RectF(60, 54, 54, 54), 13, C(27, 36, 27));
-    Text(g, L"K", RectF(60, 54, 54, 54), 25, C(202, 240, 106), FontStyleBold, StringAlignmentCenter, L"Segoe UI");
-    Text(g, L"KeyPulse", RectF(130, 52, 300, 34), 27, C(27, 35, 27), FontStyleBold);
-    Text(g, L"我的今日键盘热力图", RectF(130, 86, 300, 25), 13, C(117, 128, 118));
-    Text(g, TodayText(), RectF(width - 420.0f, 58, 350, 40), 14, C(106, 118, 107), FontStyleRegular, StringAlignmentFar);
-    Text(g, L"TODAY'S KEYBOARD RHYTHM", RectF(60, 150, 500, 24), 12, C(92, 114, 87), FontStyleBold);
-    Text(g, FormatNumber(TotalCount()), RectF(60, 176, 400, 78), 58, C(27, 36, 27), FontStyleBold, StringAlignmentNear, L"Georgia");
-    Text(g, L"次敲击", RectF(410, 205, 100, 30), 16, C(116, 127, 117));
-    FillRound(g, RectF(60, 278, width - 120.0f, 500), 18, C(251, 252, 248));
-    StrokeRound(g, RectF(60, 278, width - 120.0f, 500), 18, C(220, 227, 218));
-    Text(g, L"键盘热力图", RectF(86, 296, 260, 30), 18, C(29, 38, 29), FontStyleBold);
-    Text(g, L"颜色越亮，今天使用得越频繁", RectF(86, 329, 320, 22), 11, C(142, 151, 142));
-    DrawKeyboard(g, RectF(84, 370, width - 168.0f, 350), false);
+    g.Clear(C(243, 244, 242));
+    RectF canvas(20, 20, width - 40.0f, height - 40.0f);
+    FillRound(g, canvas, 8, C(255, 255, 253));
+    StrokeRound(g, canvas, 8, C(202, 209, 199));
+    FillRound(g, RectF(58, 48, 46, 46), 8, C(47, 107, 77));
+    Text(g, L"K", RectF(58, 48, 46, 46), 22, C(255, 255, 253), FontStyleBold, StringAlignmentCenter);
+    Text(g, L"KeyPulse", RectF(118, 46, 190, 28), 22, C(25, 31, 26), FontStyleBold);
+    Text(g, L"我的今日键盘热力图", RectF(118, 73, 260, 22), 12, C(94, 104, 95));
+    Text(g, TodayText(), RectF(width - 400.0f, 50, 330, 36), 13, C(76, 84, 77), FontStyleRegular, StringAlignmentFar);
+    Text(g, L"今日敲击", RectF(58, 122, 220, 66), 40, C(29, 34, 30), FontStyleBold);
+    Text(g, FormatNumber(TotalCount()), RectF(280, 112, 330, 78), 58, C(47, 107, 77), FontStyleBold);
+    Text(g, L"次", RectF(610, 122, 70, 66), 40, C(29, 34, 30), FontStyleBold);
+    Pen divider(C(215, 221, 213));
+    g.DrawLine(&divider, 720, 132, 720, 180);
+    Text(g, L"峰值", RectF(760, 124, 80, 28), 13, C(83, 92, 84));
+    Text(g, std::to_wstring(PeakRate()) + L" 次/分", RectF(760, 151, 190, 34), 22, C(225, 124, 36), FontStyleBold);
+    g.DrawLine(&divider, 990, 132, 990, 180);
+    Text(g, L"活跃", RectF(1030, 124, 80, 28), 13, C(83, 92, 84));
+    Text(g, std::to_wstring(ActiveMinutes()) + L" 分钟", RectF(1030, 151, 220, 34), 22, C(47, 107, 77), FontStyleBold);
+    Text(g, L"键盘热力图", RectF(58, 210, 240, 28), 16, C(29, 36, 30), FontStyleBold);
+    Text(g, L"颜色越深，使用频率越高", RectF(300, 211, 230, 25), 10, C(125, 134, 126));
+    DrawKeyboard(g, RectF(54, 248, width - 108.0f, 390), false);
     auto top = TopKeys(3);
-    std::wstring top_text = L"最常用：";
+    Text(g, L"最常用按键", RectF(58, 674, 180, 40), 16, C(29, 36, 30), FontStyleBold);
     for (size_t i = 0; i < top.size(); ++i) {
-        if (i) top_text += L"  ·  ";
-        top_text += KeyLabel(top[i].first) + L" " + FormatNumber(top[i].second) + L" 次";
+        float x = 300.0f + static_cast<float>(i) * 360.0f;
+        RectF key(x, 672, i == 0 ? 100.0f : 62.0f, 48);
+        FillRound(g, key, 4, C(230, 238, 226));
+        StrokeRound(g, key, 4, C(171, 190, 169));
+        Text(g, KeyLabel(top[i].first), key, 14, C(31, 76, 53), FontStyleBold, StringAlignmentCenter);
+        Text(g, FormatNumber(top[i].second), RectF(key.GetRight() + 18, 674, 150, 42), 20, C(47, 107, 77), FontStyleBold);
     }
-    Text(g, top_text, RectF(85, 735, width - 170.0f, 25), 12, C(79, 94, 79));
-    Text(g, L"仅统计次数，不记录输入内容 · KeyPulse", RectF(60, height - 78.0f, width - 120.0f, 28), 11, C(137, 147, 138), FontStyleRegular, StringAlignmentCenter);
+    g.DrawLine(&divider, 58, height - 98.0f, width - 58.0f, height - 98.0f);
+    Text(g, L"仅统计次数，不记录输入内容", RectF(58, height - 85.0f, width - 116.0f, 34), 12, C(104, 114, 105));
 }
 
 int GetEncoderClsid(const WCHAR* format, CLSID* clsid) {
@@ -573,8 +610,8 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
     }
     case WM_GETMINMAXINFO: {
         auto* info = reinterpret_cast<MINMAXINFO*>(lparam);
-        info->ptMinTrackSize.x = 1080;
-        info->ptMinTrackSize.y = 760;
+        info->ptMinTrackSize.x = 1160;
+        info->ptMinTrackSize.y = 800;
         return 0;
     }
     case WM_CLOSE:
@@ -641,7 +678,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show_command) {
     wc.hIconSm = wc.hIcon;
     wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
     if (!RegisterClassExW(&wc)) return 1;
-    RECT desired{0, 0, 1280, 840};
+    RECT desired{0, 0, 1360, 880};
     AdjustWindowRectEx(&desired, WS_OVERLAPPEDWINDOW, FALSE, 0);
     int screen_w = GetSystemMetrics(SM_CXSCREEN), screen_h = GetSystemMetrics(SM_CYSCREEN);
     g_app.window = CreateWindowExW(0, kWindowClass, kAppName, WS_OVERLAPPEDWINDOW,
