@@ -1118,7 +1118,8 @@ void ShowCalendar() {
     int height = required.bottom - required.top + 6;
     int x = static_cast<int>(g_app.date_button.X + g_app.date_button.Width) - width;
     int y = static_cast<int>(g_app.date_button.GetBottom()) + 6;
-    x = (std::max)(8, (std::min)(x, client.right - width - 8));
+    int maximum_x = static_cast<int>(client.right) - width - 8;
+    x = (std::max)(8, (std::min)(x, maximum_x));
     SetWindowPos(g_app.calendar, HWND_TOP, x, y, width, height, SWP_SHOWWINDOW);
     SetFocus(g_app.calendar);
 }
