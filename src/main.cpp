@@ -4,6 +4,7 @@
 #include <commdlg.h>
 #include <shlobj.h>
 #include <gdiplus.h>
+#include <winhttp.h>
 
 #include <algorithm>
 #include <array>
@@ -13,8 +14,11 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <numeric>
+#include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace Gdiplus;
@@ -23,15 +27,30 @@ namespace fs = std::filesystem;
 namespace {
 constexpr wchar_t kWindowClass[] = L"KeyPulseNativeWindow";
 constexpr wchar_t kAppName[] = L"KeyPulse";
+constexpr wchar_t kAppVersion[] = L"0.2.0";
+constexpr wchar_t kLatestReleaseApi[] = L"https://api.github.com/repos/tangyuanx/KeyPulse/releases/latest";
 constexpr UINT WM_TRAYICON = WM_APP + 1;
+constexpr UINT WM_UPDATE_RESULT = WM_APP + 2;
 constexpr UINT_PTR TIMER_UI = 1;
 constexpr UINT ID_TRAY_OPEN = 1001;
 constexpr UINT ID_TRAY_PAUSE = 1002;
 constexpr UINT ID_TRAY_EXPORT = 1003;
-constexpr UINT ID_TRAY_EXIT = 1004;
+constexpr UINT ID_TRAY_UPDATE = 1004;
+constexpr UINT ID_TRAY_EXIT = 1005;
 constexpr uint32_t DATA_MAGIC = 0x4B50554C; // KPUL
 
 struct KeyDef { const wchar_t* label; UINT vk; float units; };
+
+enum class UpdateResultKind { UpToDate, Available, Downloaded, Error };
+
+struct UpdateResult {
+    UpdateResultKind kind = UpdateResultKind::Error;
+    std::wstring version;
+    std::wstring download_url;
+    std::wstring downloaded_file;
+    std::wstring message;
+};
+
 struct PersistedData {
     uint32_t magic = DATA_MAGIC;
     uint32_t version = 1;
@@ -50,6 +69,7 @@ struct AppState {
     NOTIFYICONDATAW tray{};
     ULONG_PTR gdiplus_token = 0;
     std::array<uint64_t, 256> counts{};
+    std::array<bool, 256> key_down{};
     std::array<int64_t, 60> minute_stamp{};
     std::array<uint32_t, 60> minute_count{};
     bool running = true;
@@ -62,6 +82,8 @@ struct AppState {
     RectF pause_button{};
     RectF reset_button{};
     RectF export_button{};
+    RectF update_button{};
+    int update_busy = 0;
     std::vector<std::pair<RectF, UINT>> key_hitboxes;
     fs::path data_directory;
 };
@@ -190,10 +212,14 @@ void ResetForNewDay() {
     g_app.dirty = true;
 }
 
-fs::path ExecutableDirectory() {
+fs::path ExecutablePath() {
     std::array<wchar_t, 32768> buffer{};
     GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
-    return fs::path(buffer.data()).parent_path();
+    return fs::path(buffer.data());
+}
+
+fs::path ExecutableDirectory() {
+    return ExecutablePath().parent_path();
 }
 
 fs::path ResolveDataDirectory() {
@@ -206,6 +232,300 @@ fs::path ResolveDataDirectory() {
         CoTaskMemFree(path);
     }
     return result;
+}
+
+struct WinHttpHandle {
+    HINTERNET value = nullptr;
+    explicit WinHttpHandle(HINTERNET handle = nullptr) : value(handle) {}
+    ~WinHttpHandle() { if (value) WinHttpCloseHandle(value); }
+    WinHttpHandle(const WinHttpHandle&) = delete;
+    WinHttpHandle& operator=(const WinHttpHandle&) = delete;
+    operator HINTERNET() const { return value; }
+    explicit operator bool() const { return value != nullptr; }
+};
+
+std::wstring Utf8ToWide(const std::string& text) {
+    if (text.empty()) return {};
+    int length = MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0);
+    if (length <= 0) return {};
+    std::wstring result(static_cast<size_t>(length), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), result.data(), length);
+    return result;
+}
+
+std::string WideToUtf8(const std::wstring& text) {
+    if (text.empty()) return {};
+    int length = WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0, nullptr, nullptr);
+    if (length <= 0) return {};
+    std::string result(static_cast<size_t>(length), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), result.data(), length, nullptr, nullptr);
+    return result;
+}
+
+bool HttpGet(const std::wstring& url, std::vector<unsigned char>& body, std::wstring& error,
+             size_t maximum_bytes = 100 * 1024 * 1024) {
+    URL_COMPONENTS parts{};
+    parts.dwStructSize = sizeof(parts);
+    parts.dwSchemeLength = static_cast<DWORD>(-1);
+    parts.dwHostNameLength = static_cast<DWORD>(-1);
+    parts.dwUrlPathLength = static_cast<DWORD>(-1);
+    parts.dwExtraInfoLength = static_cast<DWORD>(-1);
+    if (!WinHttpCrackUrl(url.c_str(), 0, 0, &parts)) {
+        error = L"无法解析更新地址，错误代码 " + std::to_wstring(GetLastError());
+        return false;
+    }
+    std::wstring host(parts.lpszHostName, parts.dwHostNameLength);
+    std::wstring path(parts.lpszUrlPath, parts.dwUrlPathLength);
+    if (parts.dwExtraInfoLength > 0) path.append(parts.lpszExtraInfo, parts.dwExtraInfoLength);
+    WinHttpHandle session(WinHttpOpen(L"KeyPulse/0.2.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+        WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0));
+    if (!session) {
+        error = L"无法初始化网络连接，错误代码 " + std::to_wstring(GetLastError());
+        return false;
+    }
+    WinHttpSetTimeouts(session, 5000, 5000, 10000, 30000);
+    WinHttpHandle connection(WinHttpConnect(session, host.c_str(), parts.nPort, 0));
+    if (!connection) {
+        error = L"无法连接 GitHub，错误代码 " + std::to_wstring(GetLastError());
+        return false;
+    }
+    DWORD flags = parts.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0;
+    WinHttpHandle request(WinHttpOpenRequest(connection, L"GET", path.c_str(), nullptr,
+        WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, flags));
+    if (!request) {
+        error = L"无法创建更新请求，错误代码 " + std::to_wstring(GetLastError());
+        return false;
+    }
+    const wchar_t headers[] = L"Accept: application/vnd.github+json\r\nX-GitHub-Api-Version: 2022-11-28\r\n";
+    if (!WinHttpSendRequest(request, headers, static_cast<DWORD>(-1), WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
+        !WinHttpReceiveResponse(request, nullptr)) {
+        error = L"GitHub 请求失败，错误代码 " + std::to_wstring(GetLastError());
+        return false;
+    }
+    DWORD status = 0, status_size = sizeof(status);
+    if (!WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+        WINHTTP_HEADER_NAME_BY_INDEX, &status, &status_size, WINHTTP_NO_HEADER_INDEX) || status != 200) {
+        error = L"GitHub 返回状态码 " + std::to_wstring(status);
+        return false;
+    }
+    body.clear();
+    std::array<unsigned char, 16384> buffer{};
+    while (true) {
+        DWORD bytes_read = 0;
+        if (!WinHttpReadData(request, buffer.data(), static_cast<DWORD>(buffer.size()), &bytes_read)) {
+            error = L"读取更新数据失败，错误代码 " + std::to_wstring(GetLastError());
+            return false;
+        }
+        if (bytes_read == 0) break;
+        if (body.size() + bytes_read > maximum_bytes) {
+            error = L"更新文件大小异常，已停止下载";
+            return false;
+        }
+        body.insert(body.end(), buffer.begin(), buffer.begin() + bytes_read);
+    }
+    return true;
+}
+
+bool FindJsonString(const std::string& json, const std::string& key, size_t start,
+                    std::string& value, size_t& next) {
+    size_t key_pos = json.find("\"" + key + "\"", start);
+    if (key_pos == std::string::npos) return false;
+    size_t colon = json.find(':', key_pos + key.size() + 2);
+    size_t quote = colon == std::string::npos ? std::string::npos : json.find('"', colon + 1);
+    if (quote == std::string::npos) return false;
+    value.clear();
+    bool escaped = false;
+    for (size_t i = quote + 1; i < json.size(); ++i) {
+        char ch = json[i];
+        if (escaped) {
+            if (ch == 'n') value.push_back('\n');
+            else if (ch == 'r') value.push_back('\r');
+            else if (ch == 't') value.push_back('\t');
+            else value.push_back(ch);
+            escaped = false;
+        } else if (ch == '\\') {
+            escaped = true;
+        } else if (ch == '"') {
+            next = i + 1;
+            return true;
+        } else {
+            value.push_back(ch);
+        }
+    }
+    return false;
+}
+
+std::vector<int> VersionParts(std::wstring version) {
+    if (!version.empty() && (version.front() == L'v' || version.front() == L'V')) version.erase(version.begin());
+    std::vector<int> parts;
+    size_t start = 0;
+    while (start <= version.size()) {
+        size_t end = version.find(L'.', start);
+        std::wstring item = version.substr(start, end == std::wstring::npos ? std::wstring::npos : end - start);
+        try { parts.push_back(item.empty() ? 0 : std::stoi(item)); } catch (...) { parts.push_back(0); }
+        if (end == std::wstring::npos) break;
+        start = end + 1;
+    }
+    return parts;
+}
+
+bool IsNewerVersion(const std::wstring& candidate, const std::wstring& current) {
+    auto left = VersionParts(candidate);
+    auto right = VersionParts(current);
+    size_t count = (std::max)(left.size(), right.size());
+    left.resize(count);
+    right.resize(count);
+    for (size_t i = 0; i < count; ++i) {
+        if (left[i] != right[i]) return left[i] > right[i];
+    }
+    return false;
+}
+
+void PostUpdateResult(HWND window, std::unique_ptr<UpdateResult> result) {
+    UpdateResult* raw = result.release();
+    if (!PostMessageW(window, WM_UPDATE_RESULT, 0, reinterpret_cast<LPARAM>(raw))) delete raw;
+}
+
+void StartUpdateCheck(HWND window) {
+    if (g_app.update_busy != 0) return;
+    g_app.update_busy = 1;
+    InvalidateRect(window, nullptr, FALSE);
+    std::thread([window]() {
+        auto result = std::make_unique<UpdateResult>();
+        std::vector<unsigned char> bytes;
+        std::wstring error;
+        if (!HttpGet(kLatestReleaseApi, bytes, error, 2 * 1024 * 1024)) {
+            result->message = error;
+            PostUpdateResult(window, std::move(result));
+            return;
+        }
+        std::string json(bytes.begin(), bytes.end());
+        std::string tag;
+        size_t next = 0;
+        if (!FindJsonString(json, "tag_name", 0, tag, next)) {
+            result->message = L"GitHub Release 信息格式无法识别";
+            PostUpdateResult(window, std::move(result));
+            return;
+        }
+        result->version = Utf8ToWide(tag);
+        if (!IsNewerVersion(result->version, kAppVersion)) {
+            result->kind = UpdateResultKind::UpToDate;
+            PostUpdateResult(window, std::move(result));
+            return;
+        }
+        size_t cursor = 0;
+        std::string name;
+        std::string url;
+        while (FindJsonString(json, "name", cursor, name, next)) {
+            cursor = next;
+            if (name == "KeyPulse.exe" && FindJsonString(json, "browser_download_url", cursor, url, next)) break;
+            url.clear();
+        }
+        if (url.empty()) {
+            result->message = L"最新 Release 中没有找到 KeyPulse.exe";
+            PostUpdateResult(window, std::move(result));
+            return;
+        }
+        result->kind = UpdateResultKind::Available;
+        result->download_url = Utf8ToWide(url);
+        PostUpdateResult(window, std::move(result));
+    }).detach();
+}
+
+void StartUpdateDownload(HWND window, std::wstring version, std::wstring url) {
+    g_app.update_busy = 2;
+    InvalidateRect(window, nullptr, FALSE);
+    std::thread([window, version = std::move(version), url = std::move(url)]() {
+        auto result = std::make_unique<UpdateResult>();
+        result->version = version;
+        std::vector<unsigned char> bytes;
+        std::wstring error;
+        if (!HttpGet(url, bytes, error) || bytes.size() < 2 || bytes[0] != 'M' || bytes[1] != 'Z') {
+            result->message = error.empty() ? L"下载到的文件不是有效的 Windows 程序" : error;
+            PostUpdateResult(window, std::move(result));
+            return;
+        }
+        try {
+            fs::path file = fs::temp_directory_path() /
+                (L"KeyPulse-update-" + std::to_wstring(GetCurrentProcessId()) + L".exe");
+            std::ofstream stream(file, std::ios::binary | std::ios::trunc);
+            stream.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+            stream.close();
+            if (!stream) throw std::runtime_error("write failed");
+            result->kind = UpdateResultKind::Downloaded;
+            result->downloaded_file = file.wstring();
+        } catch (...) {
+            result->message = L"无法把新版程序写入临时目录";
+        }
+        PostUpdateResult(window, std::move(result));
+    }).detach();
+}
+
+std::wstring PowerShellQuote(std::wstring value) {
+    size_t position = 0;
+    while ((position = value.find(L'\'', position)) != std::wstring::npos) {
+        value.insert(position, 1, L'\'');
+        position += 2;
+    }
+    return L"'" + value + L"'";
+}
+
+bool LaunchUpdateInstaller(const std::wstring& downloaded_file, std::wstring& error) {
+    fs::path target = ExecutablePath();
+    fs::path probe = ExecutableDirectory() /
+        (L".keypulse-write-test-" + std::to_wstring(GetCurrentProcessId()));
+    HANDLE probe_handle = CreateFileW(probe.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+        FILE_ATTRIBUTE_TEMPORARY, nullptr);
+    if (probe_handle == INVALID_HANDLE_VALUE) {
+        error = L"当前程序目录不可写，请把 KeyPulse.exe 移到普通文件夹后再更新";
+        return false;
+    }
+    CloseHandle(probe_handle);
+    DeleteFileW(probe.c_str());
+    fs::path script_path = fs::temp_directory_path() /
+        (L"KeyPulse-updater-" + std::to_wstring(GetCurrentProcessId()) + L".ps1");
+    std::wstring source_quoted = PowerShellQuote(downloaded_file);
+    std::wstring target_quoted = PowerShellQuote(target.wstring());
+    std::wstring script =
+        L"$source = " + source_quoted + L"\r\n" +
+        L"$target = " + target_quoted + L"\r\n" +
+        L"Start-Sleep -Milliseconds 900\r\n" +
+        L"for ($i = 0; $i -lt 20; $i++) {\r\n" +
+        L"  try {\r\n" +
+        L"    Copy-Item -LiteralPath $source -Destination $target -Force -ErrorAction Stop\r\n" +
+        L"    Start-Process -FilePath $target\r\n" +
+        L"    Remove-Item -LiteralPath $source -Force -ErrorAction SilentlyContinue\r\n" +
+        L"    Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue\r\n" +
+        L"    exit 0\r\n" +
+        L"  } catch { Start-Sleep -Milliseconds 500 }\r\n" +
+        L"}\r\n";
+    std::string utf8 = WideToUtf8(script);
+    try {
+        std::ofstream stream(script_path, std::ios::binary | std::ios::trunc);
+        const unsigned char bom[] = {0xEF, 0xBB, 0xBF};
+        stream.write(reinterpret_cast<const char*>(bom), sizeof(bom));
+        stream.write(utf8.data(), static_cast<std::streamsize>(utf8.size()));
+        stream.close();
+        if (!stream) throw std::runtime_error("write failed");
+    } catch (...) {
+        error = L"无法创建更新脚本";
+        return false;
+    }
+    std::wstring command = L"powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"" +
+        script_path.wstring() + L"\"";
+    std::vector<wchar_t> mutable_command(command.begin(), command.end());
+    mutable_command.push_back(L'\0');
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    if (!CreateProcessW(nullptr, mutable_command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+        nullptr, nullptr, &startup, &process)) {
+        error = L"无法启动更新程序，错误代码 " + std::to_wstring(GetLastError());
+        return false;
+    }
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    return true;
 }
 
 void SaveData() {
@@ -375,13 +695,16 @@ void DrawDashboard(Graphics& g, int width, int height) {
     FillRound(g, RectF(28, 16, 36, 36), 8, C(47, 107, 77));
     Text(g, L"K", RectF(28, 16, 36, 36), 17, C(255, 255, 253), FontStyleBold, StringAlignmentCenter);
     Text(g, L"KeyPulse", RectF(74, 14, 150, 22), 16, C(27, 35, 27), FontStyleBold);
-    Text(g, L"输入节奏仪表盘", RectF(74, 35, 150, 16), 9, C(118, 128, 119));
+    Text(g, std::wstring(L"输入节奏仪表盘 · v") + kAppVersion, RectF(74, 35, 190, 16), 9, C(118, 128, 119));
     float right = static_cast<float>(width) - 28;
     g_app.export_button = RectF(right - 104, 17, 104, 34);
-    g_app.pause_button = RectF(right - 214, 17, 100, 34);
-    g_app.reset_button = RectF(right - 308, 17, 84, 34);
+    g_app.update_button = RectF(right - 214, 17, 100, 34);
+    g_app.pause_button = RectF(right - 324, 17, 100, 34);
+    g_app.reset_button = RectF(right - 418, 17, 84, 34);
     DrawButton(g, g_app.reset_button, L"清空数据");
     DrawButton(g, g_app.pause_button, g_app.running ? L"暂停记录" : L"继续记录", true);
+    DrawButton(g, g_app.update_button, g_app.update_busy == 1 ? L"正在检查" :
+        (g_app.update_busy == 2 ? L"正在下载" : L"检查更新"));
     DrawButton(g, g_app.export_button, L"导出图片");
     float content_w = static_cast<float>(width) - 56;
     Text(g, L"键盘敲击统计", RectF(28, 83, 330, 38), 27, C(25, 31, 26), FontStyleBold);
@@ -529,19 +852,29 @@ void ResetToday(HWND owner) {
 }
 
 LRESULT CALLBACK KeyboardHook(int code, WPARAM wparam, LPARAM lparam) {
-    if (code == HC_ACTION && g_app.running && (wparam == WM_KEYDOWN || wparam == WM_SYSKEYDOWN)) {
+    if (code == HC_ACTION) {
         const auto* key = reinterpret_cast<KBDLLHOOKSTRUCT*>(lparam);
         if ((key->flags & LLKHF_INJECTED) == 0 && key->vkCode < 256) {
-            if (TodayKey() != g_app.date_key) ResetForNewDay();
-            ++g_app.counts[key->vkCode];
-            int64_t minute = EpochMinute();
-            size_t slot = static_cast<size_t>(minute % 60);
-            if (g_app.minute_stamp[slot] != minute) {
-                g_app.minute_stamp[slot] = minute;
-                g_app.minute_count[slot] = 0;
+            bool released = wparam == WM_KEYUP || wparam == WM_SYSKEYUP || (key->flags & LLKHF_UP) != 0;
+            if (released) {
+                g_app.key_down[key->vkCode] = false;
+            } else if ((wparam == WM_KEYDOWN || wparam == WM_SYSKEYDOWN) && !g_app.key_down[key->vkCode]) {
+                // Windows repeatedly emits WM_KEYDOWN while a key is held. Count only
+                // the physical transition from released to pressed.
+                g_app.key_down[key->vkCode] = true;
+                if (g_app.running) {
+                    if (TodayKey() != g_app.date_key) ResetForNewDay();
+                    ++g_app.counts[key->vkCode];
+                    int64_t minute = EpochMinute();
+                    size_t slot = static_cast<size_t>(minute % 60);
+                    if (g_app.minute_stamp[slot] != minute) {
+                        g_app.minute_stamp[slot] = minute;
+                        g_app.minute_count[slot] = 0;
+                    }
+                    ++g_app.minute_count[slot];
+                    g_app.dirty = true;
+                }
             }
-            ++g_app.minute_count[slot];
-            g_app.dirty = true;
         }
     }
     return CallNextHookEx(g_app.hook, code, wparam, lparam);
@@ -568,6 +901,7 @@ void ShowTrayMenu(HWND window) {
     AppendMenuW(menu, MF_STRING, ID_TRAY_OPEN, L"打开 KeyPulse");
     AppendMenuW(menu, MF_STRING, ID_TRAY_PAUSE, g_app.running ? L"暂停记录" : L"继续记录");
     AppendMenuW(menu, MF_STRING, ID_TRAY_EXPORT, L"导出 PNG 分享图");
+    AppendMenuW(menu, MF_STRING, ID_TRAY_UPDATE, L"检查更新");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, ID_TRAY_EXIT, L"退出");
     SetForegroundWindow(window);
@@ -599,11 +933,39 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         if (g_app.dirty && GetTickCount64() - g_app.last_save_tick >= 15000) SaveData();
         if (IsWindowVisible(window)) InvalidateRect(window, nullptr, FALSE);
         return 0;
+    case WM_UPDATE_RESULT: {
+        std::unique_ptr<UpdateResult> result(reinterpret_cast<UpdateResult*>(lparam));
+        g_app.update_busy = 0;
+        InvalidateRect(window, nullptr, FALSE);
+        if (!result) return 0;
+        if (result->kind == UpdateResultKind::UpToDate) {
+            MessageBoxW(window, L"当前已经是最新版本。", L"KeyPulse 更新", MB_OK | MB_ICONINFORMATION);
+        } else if (result->kind == UpdateResultKind::Available) {
+            std::wstring prompt = L"发现新版本 " + result->version + L"。\n\n是否立即下载，完成后自动重启 KeyPulse？";
+            if (MessageBoxW(window, prompt.c_str(), L"KeyPulse 更新", MB_YESNO | MB_ICONINFORMATION) == IDYES) {
+                StartUpdateDownload(window, result->version, result->download_url);
+            }
+        } else if (result->kind == UpdateResultKind::Downloaded) {
+            std::wstring error;
+            if (LaunchUpdateInstaller(result->downloaded_file, error)) {
+                SaveData();
+                g_app.exit_requested = true;
+                SendMessageW(window, WM_CLOSE, 0, 0);
+            } else {
+                MessageBoxW(window, error.c_str(), L"更新失败", MB_OK | MB_ICONERROR);
+            }
+        } else {
+            std::wstring message_text = result->message.empty() ? L"检查更新失败，请稍后重试。" : result->message;
+            MessageBoxW(window, message_text.c_str(), L"更新失败", MB_OK | MB_ICONERROR);
+        }
+        return 0;
+    }
     case WM_LBUTTONUP: {
         float x = static_cast<float>(GET_X_LPARAM(lparam));
         float y = static_cast<float>(GET_Y_LPARAM(lparam));
         if (PointInside(g_app.pause_button, x, y)) ToggleRunning();
         else if (PointInside(g_app.reset_button, x, y)) ResetToday(window);
+        else if (PointInside(g_app.update_button, x, y)) StartUpdateCheck(window);
         else if (PointInside(g_app.export_button, x, y)) ExportPng(window);
         else for (const auto& item : g_app.key_hitboxes) if (PointInside(item.first, x, y)) { g_app.selected_vk = item.second; InvalidateRect(window, nullptr, FALSE); break; }
         return 0;
@@ -639,6 +1001,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         case ID_TRAY_OPEN: ShowMainWindow(); break;
         case ID_TRAY_PAUSE: ToggleRunning(); break;
         case ID_TRAY_EXPORT: ShowMainWindow(); ExportPng(window); break;
+        case ID_TRAY_UPDATE: ShowMainWindow(); StartUpdateCheck(window); break;
         case ID_TRAY_EXIT: g_app.exit_requested = true; SendMessageW(window, WM_CLOSE, 0, 0); break;
         default: break;
         }
