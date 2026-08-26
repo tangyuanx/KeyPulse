@@ -29,7 +29,7 @@ namespace fs = std::filesystem;
 namespace {
 constexpr wchar_t kWindowClass[] = L"KeyPulseNativeWindow";
 constexpr wchar_t kAppName[] = L"KeyPulse";
-constexpr wchar_t kAppVersion[] = L"0.3.1";
+constexpr wchar_t kAppVersion[] = L"0.3.2";
 constexpr wchar_t kLatestReleaseApi[] = L"https://api.github.com/repos/tangyuanx/KeyPulse/releases/latest";
 constexpr UINT WM_TRAYICON = WM_APP + 1;
 constexpr UINT WM_UPDATE_RESULT = WM_APP + 2;
@@ -197,18 +197,45 @@ void StrokeRound(Graphics& g, const RectF& r, float radius, const Color& color, 
 void Text(Graphics& g, const std::wstring& text, const RectF& rect, float size, const Color& color,
           FontStyle style = FontStyleRegular, StringAlignment align = StringAlignmentNear,
           const wchar_t* family_name = L"Microsoft YaHei UI") {
-    // Keep the entire interface on one predictable Chinese UI typeface.
-    // The parameter remains for source compatibility, but intentional font
-    // mixing is disabled because it makes Chinese and numbers feel unrelated.
-    (void)family_name;
-    FontFamily family(L"Microsoft YaHei UI");
-    Font font(&family, size, style, UnitPixel);
+    FontFamily requested(family_name);
+    FontFamily fallback(L"Microsoft YaHei UI");
+    FontFamily* family = requested.IsAvailable() ? &requested : &fallback;
+    Font font(family, size, style, UnitPixel);
     SolidBrush brush(color);
     StringFormat format;
     format.SetAlignment(align);
     format.SetLineAlignment(StringAlignmentCenter);
     format.SetTrimming(StringTrimmingEllipsisCharacter);
     g.DrawString(text.c_str(), -1, &font, rect, &format, &brush);
+}
+
+float TextWidth(Graphics& g, const std::wstring& text, float size, FontStyle style,
+                const wchar_t* family_name) {
+    FontFamily requested(family_name);
+    FontFamily fallback(L"Microsoft YaHei UI");
+    FontFamily* family = requested.IsAvailable() ? &requested : &fallback;
+    Font font(family, size, style, UnitPixel);
+    RectF measured;
+    PointF origin(0, 0);
+    g.MeasureString(text.c_str(), -1, &font, origin, &measured);
+    return measured.Width;
+}
+
+void MixedValueText(Graphics& g, const std::wstring& value, const RectF& rect,
+                    float number_size, float unit_size, const Color& color,
+                    FontStyle number_style = FontStyleBold) {
+    size_t separator = value.find(L' ');
+    if (separator == std::wstring::npos) {
+        Text(g, value, rect, number_size, color, number_style, StringAlignmentNear, L"Bahnschrift");
+        return;
+    }
+    std::wstring number = value.substr(0, separator);
+    std::wstring unit = value.substr(separator + 1);
+    float number_width = TextWidth(g, number, number_size, number_style, L"Bahnschrift");
+    Text(g, number, RectF(rect.X, rect.Y, number_width + 3.0f, rect.Height), number_size,
+        color, number_style, StringAlignmentNear, L"Bahnschrift");
+    Text(g, unit, RectF(rect.X + number_width + 5.0f, rect.Y, rect.Width - number_width - 5.0f, rect.Height),
+        unit_size, color, FontStyleBold);
 }
 
 std::vector<std::vector<KeyDef>> KeyboardRows() {
@@ -886,8 +913,8 @@ Color HeatColor(uint64_t value, uint64_t maximum) {
 void DrawStatCard(Graphics& g, float x, float y, float w, const std::wstring& label,
                   const std::wstring& value, const std::wstring& note, const Color& accent) {
     Text(g, label, RectF(x + 22, y + 12, w - 44, 20), 11, C(76, 84, 77));
-    Text(g, value, RectF(x + 22, y + 34, w - 44, 32), 23, accent, FontStyleBold);
-    Text(g, note, RectF(x + 22, y + 70, w - 44, 17), 9, C(133, 141, 134));
+    MixedValueText(g, value, RectF(x + 22, y + 33, w - 44, 34), 27, 18, accent);
+    Text(g, note, RectF(x + 22, y + 70, w - 44, 18), 9.5f, C(133, 141, 134));
 }
 
 void DrawButton(Graphics& g, const RectF& r, const std::wstring& label, bool primary = false, bool accent = false) {
@@ -968,7 +995,7 @@ void DrawCalendar(Graphics& g, int window_width) {
         Color date_color = selected ? C(255, 255, 253) :
             (!current_month || future ? C(174, 181, 175) : C(45, 54, 46));
         Text(g, std::to_wstring(date_key % 100), RectF(cell.X, cell.Y - 1, cell.Width, 27),
-            10.5f, date_color, selected ? FontStyleBold : FontStyleRegular, StringAlignmentCenter);
+            11.0f, date_color, selected ? FontStyleBold : FontStyleRegular, StringAlignmentCenter, L"Bahnschrift");
         if (g_app.calendar_has_data[i] || (date_key == g_app.date_key && today_total > 0)) {
             SolidBrush dot(selected ? C(224, 239, 228) : C(47, 107, 77));
             g.FillEllipse(&dot, RectF(cell.X + cell.Width / 2.0f - 2.0f, cell.Y + 27.0f, 4.0f, 4.0f));
@@ -1014,10 +1041,10 @@ void DrawKeyboard(Graphics& g, const RectF& bounds, bool register_hits) {
             bool bright = counts[key.vk] > maximum * 45 / 100 && maximum > 0;
             bool selected = register_hits && key.vk == g_app.selected_vk;
             StrokeRound(g, r, 4, selected ? C(34, 103, 68) : C(204, 211, 202), selected ? 2.0f : 1.0f);
-            Text(g, key.label, RectF(r.X + 6, r.Y + 3, r.Width - 12, r.Height * .46f), r.Width < 42 ? 8.0f : 9.0f,
-                 bright ? C(255, 255, 253) : C(39, 46, 40), FontStyleRegular);
-            if (counts[key.vk] > 0) Text(g, FormatNumber(counts[key.vk]), RectF(r.X + 6, r.Y + r.Height * .48f, r.Width - 12, r.Height * .40f), 7,
-                 bright ? C(226, 240, 229) : C(115, 126, 116));
+            Text(g, key.label, RectF(r.X + 6, r.Y + 3, r.Width - 12, r.Height * .46f), r.Width < 42 ? 8.2f : 9.0f,
+                 bright ? C(255, 255, 253) : C(39, 46, 40), FontStyleRegular, StringAlignmentNear, L"Bahnschrift");
+            if (counts[key.vk] > 0) Text(g, FormatNumber(counts[key.vk]), RectF(r.X + 6, r.Y + r.Height * .48f, r.Width - 12, r.Height * .40f), 7.5f,
+                 bright ? C(226, 240, 229) : C(115, 126, 116), FontStyleRegular, StringAlignmentNear, L"Bahnschrift");
             if (register_hits) g_app.key_hitboxes.emplace_back(r, key.vk);
             x += r.Width + gap;
         }
@@ -1036,10 +1063,10 @@ std::vector<std::pair<UINT, uint64_t>> TopKeys(size_t count) {
 void DrawRankPanel(Graphics& g, const RectF& panel) {
     FillRound(g, panel, 8, C(255, 255, 253));
     StrokeRound(g, panel, 8, C(216, 222, 214));
-    Text(g, L"高频按键", RectF(panel.X + 16, panel.Y + 12, panel.Width - 32, 24), 13, C(30, 39, 30), FontStyleBold);
-    Text(g, L"#", RectF(panel.X + 16, panel.Y + 43, 26, 20), 9, C(132, 140, 133));
-    Text(g, L"按键", RectF(panel.X + 48, panel.Y + 43, 72, 20), 9, C(132, 140, 133));
-    Text(g, L"次数", RectF(panel.X + 122, panel.Y + 43, panel.Width - 138, 20), 9, C(132, 140, 133), FontStyleRegular, StringAlignmentFar);
+    Text(g, L"高频按键", RectF(panel.X + 16, panel.Y + 12, panel.Width - 32, 24), 14, C(30, 39, 30), FontStyleBold);
+    Text(g, L"#", RectF(panel.X + 16, panel.Y + 43, 26, 20), 9.5f, C(132, 140, 133), FontStyleRegular, StringAlignmentNear, L"Bahnschrift");
+    Text(g, L"按键", RectF(panel.X + 48, panel.Y + 43, 72, 20), 9.5f, C(132, 140, 133));
+    Text(g, L"次数", RectF(panel.X + 122, panel.Y + 43, panel.Width - 138, 20), 9.5f, C(132, 140, 133), FontStyleRegular, StringAlignmentFar);
     Pen line(C(229, 233, 227));
     g.DrawLine(&line, panel.X + 14, panel.Y + 66, panel.GetRight() - 14, panel.Y + 66);
     auto top = TopKeys(10);
@@ -1047,17 +1074,17 @@ void DrawRankPanel(Graphics& g, const RectF& panel) {
         float y = panel.Y + 70 + static_cast<float>(i) * 30;
         if (i >= top.size()) continue;
         Color strong = i < 3 ? C(47, 107, 77) : C(65, 74, 66);
-        Text(g, std::to_wstring(i + 1), RectF(panel.X + 16, y, 26, 25), 9, C(136, 144, 137));
-        Text(g, KeyLabel(top[i].first), RectF(panel.X + 48, y, 74, 25), 10, strong, i < 3 ? FontStyleBold : FontStyleRegular);
-        Text(g, FormatNumber(top[i].second), RectF(panel.X + 122, y, panel.Width - 138, 25), 10, strong, i < 3 ? FontStyleBold : FontStyleRegular, StringAlignmentFar);
+        Text(g, std::to_wstring(i + 1), RectF(panel.X + 16, y, 26, 25), 9.5f, C(136, 144, 137), FontStyleRegular, StringAlignmentNear, L"Bahnschrift");
+        Text(g, KeyLabel(top[i].first), RectF(panel.X + 48, y, 74, 25), 10.5f, strong, i < 3 ? FontStyleBold : FontStyleRegular, StringAlignmentNear, L"Bahnschrift");
+        Text(g, FormatNumber(top[i].second), RectF(panel.X + 122, y, panel.Width - 138, 25), 10.5f, strong, i < 3 ? FontStyleBold : FontStyleRegular, StringAlignmentFar, L"Bahnschrift");
     }
 }
 
 void DrawChart(Graphics& g, const RectF& panel) {
     FillRound(g, panel, 8, C(255, 255, 253));
     StrokeRound(g, panel, 8, C(216, 222, 214));
-    Text(g, ViewingToday() ? L"最近 60 分钟" : L"当日节奏", RectF(panel.X + 16, panel.Y + 10, 150, 22), 12, C(30, 39, 30), FontStyleBold);
-    Text(g, ViewingToday() ? L"每分钟敲击次数" : L"每 10 分钟敲击次数", RectF(panel.X + 16, panel.Y + 32, 150, 16), 8, C(148, 156, 148));
+    Text(g, ViewingToday() ? L"最近 60 分钟" : L"当日节奏", RectF(panel.X + 16, panel.Y + 10, 150, 22), 13, C(30, 39, 30), FontStyleBold);
+    Text(g, ViewingToday() ? L"每分钟敲击次数" : L"每 10 分钟敲击次数", RectF(panel.X + 16, panel.Y + 32, 150, 17), 9, C(148, 156, 148));
     RectF chart(panel.X + 170, panel.Y + 14, panel.Width - 188, panel.Height - 26);
     Pen grid(C(232, 236, 230));
     for (int i = 0; i < 3; ++i) {
@@ -1109,9 +1136,9 @@ void DrawDashboard(Graphics& g, int width, int height) {
     Pen nav_line(C(222, 228, 220));
     g.DrawLine(&nav_line, 0, 67, width, 67);
     FillRound(g, RectF(28, 16, 36, 36), 8, C(47, 107, 77));
-    Text(g, L"K", RectF(28, 16, 36, 36), 17, C(255, 255, 253), FontStyleBold, StringAlignmentCenter);
-    Text(g, L"KeyPulse", RectF(74, 14, 150, 22), 16, C(27, 35, 27), FontStyleBold);
-    Text(g, std::wstring(L"v") + kAppVersion, RectF(74, 35, 190, 16), 9, C(118, 128, 119));
+    Text(g, L"K", RectF(28, 16, 36, 36), 17, C(255, 255, 253), FontStyleBold, StringAlignmentCenter, L"Bahnschrift");
+    Text(g, L"KeyPulse", RectF(74, 16, 88, 34), 16, C(27, 35, 27), FontStyleBold, StringAlignmentNear, L"Bahnschrift");
+    Text(g, std::wstring(L"v") + kAppVersion, RectF(164, 18, 58, 30), 9.5f, C(118, 128, 119), FontStyleRegular, StringAlignmentNear, L"Bahnschrift");
     float right = static_cast<float>(width) - 28;
     g_app.export_button = RectF(right - 104, 17, 104, 34);
     g_app.update_button = RectF(right - 214, 17, 100, 34);
@@ -1126,7 +1153,7 @@ void DrawDashboard(Graphics& g, int width, int height) {
     DrawButton(g, g_app.update_button, update_label, false, g_app.update_available || g_app.update_busy == 2);
     DrawButton(g, g_app.export_button, L"导出图片");
     float content_w = static_cast<float>(width) - 56;
-    Text(g, L"键盘敲击统计", RectF(28, 86, 330, 38), 27, C(25, 31, 26), FontStyleBold);
+    Text(g, L"键盘敲击统计", RectF(28, 86, 330, 38), 26, C(25, 31, 26), FontStyleBold);
     g_app.date_button = RectF(static_cast<float>(width) - 250, 88, 222, 36);
     DrawButton(g, g_app.date_button, DateText(g_app.selected_date_key) + L"  ▾");
     float cards_y = 140;
@@ -1157,16 +1184,17 @@ void DrawDashboard(Graphics& g, int width, int height) {
     RectF keyboard_panel(28, main_y, keyboard_w, 398);
     FillRound(g, keyboard_panel, 8, C(255, 255, 253));
     StrokeRound(g, keyboard_panel, 8, C(216, 222, 214));
-    Text(g, L"键盘热力图", RectF(44, main_y + 10, 200, 23), 13, C(30, 39, 30), FontStyleBold);
+    Text(g, L"键盘热力图", RectF(44, main_y + 10, 200, 23), 14, C(30, 39, 30), FontStyleBold);
     RectF keyboard(43, main_y + 42, keyboard_w - 30, 298);
     DrawKeyboard(g, keyboard, true);
     RectF selected(43, main_y + 352, keyboard_w - 30, 32);
     FillRound(g, selected, 7, C(240, 243, 237));
-    Text(g, L"已选按键", RectF(selected.X + 10, selected.Y, 62, selected.Height), 8, C(135, 144, 136));
+    Text(g, L"已选按键", RectF(selected.X + 10, selected.Y, 62, selected.Height), 9, C(135, 144, 136));
     RectF selected_key(selected.X + 75, selected.Y + 5, 48, 22);
     FillRound(g, selected_key, 4, C(35, 45, 34));
-    Text(g, KeyLabel(g_app.selected_vk), selected_key, 8, C(232, 239, 228), FontStyleBold, StringAlignmentCenter);
-    Text(g, FormatNumber(VisibleCounts()[g_app.selected_vk]) + L" 次敲击", RectF(selected.X + 134, selected.Y, 150, selected.Height), 10, C(45, 56, 45), FontStyleBold);
+    Text(g, KeyLabel(g_app.selected_vk), selected_key, 8.5f, C(232, 239, 228), FontStyleBold, StringAlignmentCenter, L"Bahnschrift");
+    MixedValueText(g, FormatNumber(VisibleCounts()[g_app.selected_vk]) + L" 次敲击",
+        RectF(selected.X + 134, selected.Y, 170, selected.Height), 10.5f, 9.5f, C(45, 56, 45));
     DrawRankPanel(g, RectF(28 + keyboard_w + 12, main_y, rank_w, 398));
     if (height > 764) DrawChart(g, RectF(28, 668, content_w, static_cast<float>(height) - 696));
     if (g_app.calendar_visible) DrawCalendar(g, width);
@@ -1180,20 +1208,20 @@ void DrawShareCard(Graphics& g, int width, int height) {
     FillRound(g, canvas, 8, C(255, 255, 253));
     StrokeRound(g, canvas, 8, C(202, 209, 199));
     FillRound(g, RectF(58, 48, 46, 46), 8, C(47, 107, 77));
-    Text(g, L"K", RectF(58, 48, 46, 46), 22, C(255, 255, 253), FontStyleBold, StringAlignmentCenter);
-    Text(g, L"KeyPulse", RectF(118, 46, 190, 28), 22, C(25, 31, 26), FontStyleBold);
+    Text(g, L"K", RectF(58, 48, 46, 46), 22, C(255, 255, 253), FontStyleBold, StringAlignmentCenter, L"Bahnschrift");
+    Text(g, L"KeyPulse", RectF(118, 46, 190, 28), 22, C(25, 31, 26), FontStyleBold, StringAlignmentNear, L"Bahnschrift");
     Text(g, L"我的键盘热力图", RectF(118, 73, 260, 22), 12, C(94, 104, 95));
     Text(g, DateText(g_app.selected_date_key), RectF(width - 400.0f, 50, 330, 36), 13, C(76, 84, 77), FontStyleRegular, StringAlignmentFar);
     Text(g, L"当日敲击", RectF(58, 122, 220, 66), 40, C(29, 34, 30), FontStyleBold);
-    Text(g, FormatNumber(TotalCount()), RectF(280, 112, 330, 78), 58, C(47, 107, 77), FontStyleBold);
+    Text(g, FormatNumber(TotalCount()), RectF(280, 112, 330, 78), 58, C(47, 107, 77), FontStyleBold, StringAlignmentNear, L"Bahnschrift");
     Text(g, L"次", RectF(610, 122, 70, 66), 40, C(29, 34, 30), FontStyleBold);
     Pen divider(C(215, 221, 213));
     g.DrawLine(&divider, 720, 132, 720, 180);
     Text(g, L"峰值", RectF(760, 124, 80, 28), 13, C(83, 92, 84));
-    Text(g, std::to_wstring(DayPeakRate()) + L" 次/分", RectF(760, 151, 190, 34), 22, C(225, 124, 36), FontStyleBold);
+    MixedValueText(g, std::to_wstring(DayPeakRate()) + L" 次/分", RectF(760, 151, 190, 34), 23, 17, C(225, 124, 36));
     g.DrawLine(&divider, 990, 132, 990, 180);
     Text(g, L"活跃", RectF(1030, 124, 80, 28), 13, C(83, 92, 84));
-    Text(g, std::to_wstring(ActiveMinutes()) + L" 分钟", RectF(1030, 151, 220, 34), 22, C(47, 107, 77), FontStyleBold);
+    MixedValueText(g, std::to_wstring(ActiveMinutes()) + L" 分钟", RectF(1030, 151, 220, 34), 23, 17, C(47, 107, 77));
     Text(g, L"键盘热力图", RectF(58, 210, 240, 28), 16, C(29, 36, 30), FontStyleBold);
     Text(g, L"颜色越深，使用频率越高", RectF(300, 211, 230, 25), 10, C(125, 134, 126));
     DrawKeyboard(g, RectF(54, 248, width - 108.0f, 390), false);
@@ -1204,8 +1232,8 @@ void DrawShareCard(Graphics& g, int width, int height) {
         RectF key(x, 672, i == 0 ? 100.0f : 62.0f, 48);
         FillRound(g, key, 4, C(230, 238, 226));
         StrokeRound(g, key, 4, C(171, 190, 169));
-        Text(g, KeyLabel(top[i].first), key, 14, C(31, 76, 53), FontStyleBold, StringAlignmentCenter);
-        Text(g, FormatNumber(top[i].second), RectF(key.GetRight() + 18, 674, 150, 42), 20, C(47, 107, 77), FontStyleBold);
+        Text(g, KeyLabel(top[i].first), key, 14, C(31, 76, 53), FontStyleBold, StringAlignmentCenter, L"Bahnschrift");
+        Text(g, FormatNumber(top[i].second), RectF(key.GetRight() + 18, 674, 150, 42), 20, C(47, 107, 77), FontStyleBold, StringAlignmentNear, L"Bahnschrift");
     }
     g.DrawLine(&divider, PointF(58.0f, height - 98.0f), PointF(width - 58.0f, height - 98.0f));
     Text(g, L"仅统计次数，不记录输入内容", RectF(58, height - 85.0f, width - 116.0f, 34), 12, C(104, 114, 105));
