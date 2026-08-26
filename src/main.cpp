@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <windowsx.h>
 #include <shellapi.h>
 #include <commdlg.h>
 #include <shlobj.h>
