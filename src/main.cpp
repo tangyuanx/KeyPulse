@@ -28,8 +28,9 @@ namespace fs = std::filesystem;
 
 namespace {
 constexpr wchar_t kWindowClass[] = L"KeyPulseNativeWindow";
+constexpr wchar_t kPreviewWindowClass[] = L"KeyPulseExportPreviewWindow";
 constexpr wchar_t kAppName[] = L"KeyPulse";
-constexpr wchar_t kAppVersion[] = L"0.3.2";
+constexpr wchar_t kAppVersion[] = L"0.3.3";
 constexpr wchar_t kLatestReleaseApi[] = L"https://api.github.com/repos/tangyuanx/KeyPulse/releases/latest";
 constexpr UINT WM_TRAYICON = WM_APP + 1;
 constexpr UINT WM_UPDATE_RESULT = WM_APP + 2;
@@ -45,6 +46,9 @@ constexpr uint32_t DATA_MAGIC = 0x4B50554C; // KPUL
 constexpr uint32_t HISTORY_MAGIC = 0x4B504844; // KPHD
 
 struct KeyDef { const wchar_t* label; UINT vk; float units; };
+
+enum class ShareTemplate { Balanced, Dark, Gallery };
+enum class KeyboardVisual { App, ShareLight, ShareDark };
 
 enum class UpdateResultKind { UpToDate, Available, Downloaded, Error };
 
@@ -124,6 +128,18 @@ struct AppState {
 };
 
 AppState g_app;
+
+struct ExportPreviewState {
+    HWND window = nullptr;
+    HWND owner = nullptr;
+    ShareTemplate selected_template = ShareTemplate::Balanced;
+    std::unique_ptr<Bitmap> image;
+    std::array<RectF, 3> template_buttons{};
+    RectF save_button{};
+    RectF cancel_button{};
+};
+
+ExportPreviewState g_preview;
 
 Color C(BYTE r, BYTE g, BYTE b, BYTE a = 255) { return Color(a, r, g, b); }
 
@@ -910,6 +926,25 @@ Color HeatColor(uint64_t value, uint64_t maximum) {
     return C(226, 236, 220);
 }
 
+Color ShareHeatColor(uint64_t value, uint64_t maximum, bool dark) {
+    if (dark) {
+        if (value == 0 || maximum == 0) return C(27, 57, 42);
+        float p = static_cast<float>(value) / static_cast<float>(maximum);
+        if (p > .72f) return C(111, 156, 117);
+        if (p > .45f) return C(82, 130, 90);
+        if (p > .25f) return C(62, 106, 75);
+        if (p > .10f) return C(47, 84, 61);
+        return C(36, 69, 50);
+    }
+    if (value == 0 || maximum == 0) return C(248, 249, 247);
+    float p = static_cast<float>(value) / static_cast<float>(maximum);
+    if (p > .72f) return C(49, 101, 71);
+    if (p > .45f) return C(105, 151, 108);
+    if (p > .25f) return C(151, 184, 148);
+    if (p > .10f) return C(193, 211, 188);
+    return C(226, 234, 223);
+}
+
 void DrawStatCard(Graphics& g, float x, float y, float w, const std::wstring& label,
                   const std::wstring& value, const std::wstring& note, const Color& accent) {
     Text(g, label, RectF(x + 22, y + 12, w - 44, 20), 11, C(76, 84, 77));
@@ -1014,9 +1049,14 @@ void DrawCalendar(Graphics& g, int window_width) {
     Text(g, L"回到今天", g_app.calendar_today_button, 10, C(47, 107, 77), FontStyleBold, StringAlignmentCenter);
 }
 
-void DrawKeyboard(Graphics& g, const RectF& bounds, bool register_hits) {
-    FillRound(g, bounds, 8, C(245, 247, 243));
-    StrokeRound(g, bounds, 8, C(218, 224, 216));
+void DrawKeyboard(Graphics& g, const RectF& bounds, bool register_hits,
+                  KeyboardVisual visual = KeyboardVisual::App) {
+    bool app_style = visual == KeyboardVisual::App;
+    bool dark_style = visual == KeyboardVisual::ShareDark;
+    if (app_style) {
+        FillRound(g, bounds, 8, C(245, 247, 243));
+        StrokeRound(g, bounds, 8, C(218, 224, 216));
+    }
     auto rows = KeyboardRows();
     const auto& counts = VisibleCounts();
     uint64_t maximum = *std::max_element(counts.begin(), counts.end());
@@ -1036,15 +1076,24 @@ void DrawKeyboard(Graphics& g, const RectF& bounds, bool register_hits) {
                 x += r.Width + gap;
                 continue;
             }
-            Color fill = HeatColor(counts[key.vk], maximum);
+            Color fill = app_style ? HeatColor(counts[key.vk], maximum) :
+                ShareHeatColor(counts[key.vk], maximum, dark_style);
             FillRound(g, r, 4, fill);
             bool bright = counts[key.vk] > maximum * 45 / 100 && maximum > 0;
             bool selected = register_hits && key.vk == g_app.selected_vk;
-            StrokeRound(g, r, 4, selected ? C(34, 103, 68) : C(204, 211, 202), selected ? 2.0f : 1.0f);
-            Text(g, key.label, RectF(r.X + 6, r.Y + 3, r.Width - 12, r.Height * .46f), r.Width < 42 ? 8.2f : 9.0f,
-                 bright ? C(255, 255, 253) : C(39, 46, 40), FontStyleRegular, StringAlignmentNear, L"Bahnschrift");
-            if (counts[key.vk] > 0) Text(g, FormatNumber(counts[key.vk]), RectF(r.X + 6, r.Y + r.Height * .48f, r.Width - 12, r.Height * .40f), 7.5f,
-                 bright ? C(226, 240, 229) : C(115, 126, 116), FontStyleRegular, StringAlignmentNear, L"Bahnschrift");
+            Color border = app_style ? C(204, 211, 202) : (dark_style ? C(57, 86, 68) : C(207, 215, 207));
+            StrokeRound(g, r, 4, selected ? C(34, 103, 68) : border, selected ? 2.0f : 1.0f);
+            if (app_style) {
+                Text(g, key.label, RectF(r.X + 6, r.Y + 3, r.Width - 12, r.Height * .46f), r.Width < 42 ? 8.2f : 9.0f,
+                     bright ? C(255, 255, 253) : C(39, 46, 40), FontStyleRegular, StringAlignmentNear, L"Bahnschrift");
+                if (counts[key.vk] > 0) Text(g, FormatNumber(counts[key.vk]), RectF(r.X + 6, r.Y + r.Height * .48f, r.Width - 12, r.Height * .40f), 7.5f,
+                     bright ? C(226, 240, 229) : C(115, 126, 116), FontStyleRegular, StringAlignmentNear, L"Bahnschrift");
+            } else {
+                Color label = dark_style ? C(231, 239, 232) : (bright ? C(255, 255, 253) : C(38, 48, 41));
+                float label_size = r.Width < 40 ? 8.0f : (r.Width < 54 ? 9.0f : 10.0f);
+                Text(g, key.label, RectF(r.X + 4, r.Y, r.Width - 8, r.Height), label_size,
+                    label, FontStyleRegular, StringAlignmentCenter, L"Bahnschrift");
+            }
             if (register_hits) g_app.key_hitboxes.emplace_back(r, key.vk);
             x += r.Width + gap;
         }
@@ -1200,43 +1249,63 @@ void DrawDashboard(Graphics& g, int width, int height) {
     if (g_app.calendar_visible) DrawCalendar(g, width);
 }
 
-void DrawShareCard(Graphics& g, int width, int height) {
+void DrawShareTotal(Graphics& g, const RectF& rect, float number_size, float unit_size,
+                    const Color& color, bool centered = false) {
+    std::wstring number = FormatNumber(TotalCount());
+    float number_width = TextWidth(g, number, number_size, FontStyleBold, L"Bahnschrift");
+    float unit_width = TextWidth(g, L"次", unit_size, FontStyleRegular, L"Microsoft YaHei UI");
+    float total_width = number_width + 14.0f + unit_width;
+    float x = centered ? rect.X + (rect.Width - total_width) / 2.0f : rect.X;
+    Text(g, number, RectF(x, rect.Y, number_width + 4.0f, rect.Height), number_size,
+        color, FontStyleBold, StringAlignmentNear, L"Bahnschrift");
+    Text(g, L"次", RectF(x + number_width + 14.0f, rect.Y + number_size * .13f,
+        unit_width + 8.0f, rect.Height), unit_size, color);
+}
+
+void DrawShareCard(Graphics& g, int width, int height, ShareTemplate share_template) {
     g.SetSmoothingMode(SmoothingModeAntiAlias);
+    g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
     g.SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
-    g.Clear(C(243, 244, 242));
-    RectF canvas(20, 20, width - 40.0f, height - 40.0f);
-    FillRound(g, canvas, 8, C(255, 255, 253));
-    StrokeRound(g, canvas, 8, C(202, 209, 199));
-    FillRound(g, RectF(58, 48, 46, 46), 8, C(47, 107, 77));
-    Text(g, L"K", RectF(58, 48, 46, 46), 22, C(255, 255, 253), FontStyleBold, StringAlignmentCenter, L"Bahnschrift");
-    Text(g, L"KeyPulse", RectF(118, 46, 190, 28), 22, C(25, 31, 26), FontStyleBold, StringAlignmentNear, L"Bahnschrift");
-    Text(g, L"我的键盘热力图", RectF(118, 73, 260, 22), 12, C(94, 104, 95));
-    Text(g, DateText(g_app.selected_date_key), RectF(width - 400.0f, 50, 330, 36), 13, C(76, 84, 77), FontStyleRegular, StringAlignmentFar);
-    Text(g, L"当日敲击", RectF(58, 122, 220, 66), 40, C(29, 34, 30), FontStyleBold);
-    Text(g, FormatNumber(TotalCount()), RectF(280, 112, 330, 78), 58, C(47, 107, 77), FontStyleBold, StringAlignmentNear, L"Bahnschrift");
-    Text(g, L"次", RectF(610, 122, 70, 66), 40, C(29, 34, 30), FontStyleBold);
-    Pen divider(C(215, 221, 213));
-    g.DrawLine(&divider, 720, 132, 720, 180);
-    Text(g, L"峰值", RectF(760, 124, 80, 28), 13, C(83, 92, 84));
-    MixedValueText(g, std::to_wstring(DayPeakRate()) + L" 次/分", RectF(760, 151, 190, 34), 23, 17, C(225, 124, 36));
-    g.DrawLine(&divider, 990, 132, 990, 180);
-    Text(g, L"活跃", RectF(1030, 124, 80, 28), 13, C(83, 92, 84));
-    MixedValueText(g, std::to_wstring(ActiveMinutes()) + L" 分钟", RectF(1030, 151, 220, 34), 23, 17, C(47, 107, 77));
-    Text(g, L"键盘热力图", RectF(58, 210, 240, 28), 16, C(29, 36, 30), FontStyleBold);
-    Text(g, L"颜色越深，使用频率越高", RectF(300, 211, 230, 25), 10, C(125, 134, 126));
-    DrawKeyboard(g, RectF(54, 248, width - 108.0f, 390), false);
-    auto top = TopKeys(3);
-    Text(g, L"最常用按键", RectF(58, 674, 180, 40), 16, C(29, 36, 30), FontStyleBold);
-    for (size_t i = 0; i < top.size(); ++i) {
-        float x = 300.0f + static_cast<float>(i) * 360.0f;
-        RectF key(x, 672, i == 0 ? 100.0f : 62.0f, 48);
-        FillRound(g, key, 4, C(230, 238, 226));
-        StrokeRound(g, key, 4, C(171, 190, 169));
-        Text(g, KeyLabel(top[i].first), key, 14, C(31, 76, 53), FontStyleBold, StringAlignmentCenter, L"Bahnschrift");
-        Text(g, FormatNumber(top[i].second), RectF(key.GetRight() + 18, 674, 150, 42), 20, C(47, 107, 77), FontStyleBold, StringAlignmentNear, L"Bahnschrift");
+    const std::wstring date = DateText(g_app.selected_date_key, false);
+    const std::wstring privacy = L"仅统计敲击次数，不记录输入内容";
+
+    if (share_template == ShareTemplate::Dark) {
+        g.Clear(C(20, 45, 33));
+        Text(g, L"KeyPulse", RectF(40, 28, 240, 44), 21, C(241, 245, 241),
+            FontStyleBold, StringAlignmentNear, L"Bahnschrift");
+        Text(g, date, RectF(width - 340.0f, 28, 300, 44), 16, C(151, 177, 158),
+            FontStyleRegular, StringAlignmentFar);
+        DrawShareTotal(g, RectF(280, 116, width - 560.0f, 180), 104, 40,
+            C(242, 246, 242), true);
+        DrawKeyboard(g, RectF(108, 328, width - 216.0f, 412), false, KeyboardVisual::ShareDark);
+        Text(g, privacy, RectF(450, height - 66.0f, width - 900.0f, 30), 12,
+            C(126, 158, 135), FontStyleRegular, StringAlignmentCenter);
+        return;
     }
-    g.DrawLine(&divider, PointF(58.0f, height - 98.0f), PointF(width - 58.0f, height - 98.0f));
-    Text(g, L"仅统计次数，不记录输入内容", RectF(58, height - 85.0f, width - 116.0f, 34), 12, C(104, 114, 105));
+
+    g.Clear(share_template == ShareTemplate::Gallery ? C(244, 246, 244) : C(248, 249, 247));
+    Color primary = C(31, 48, 39);
+    Color secondary = C(91, 105, 96);
+    if (share_template == ShareTemplate::Gallery) {
+        Text(g, L"KeyPulse", RectF(48, 198, 310, 52), 30, primary,
+            FontStyleRegular, StringAlignmentNear, L"Bahnschrift");
+        Text(g, date, RectF(48, 268, 310, 40), 18, primary);
+        Text(g, FormatNumber(TotalCount()), RectF(44, 344, 350, 150), 94, primary,
+            FontStyleBold, StringAlignmentNear, L"Bahnschrift");
+        Text(g, L"次", RectF(50, 482, 80, 54), 28, primary);
+        DrawKeyboard(g, RectF(414, 196, width - 452.0f, 444), false, KeyboardVisual::ShareLight);
+        Text(g, privacy, RectF(48, height - 72.0f, 360, 30), 12, C(84, 96, 88));
+        return;
+    }
+
+    Text(g, L"KeyPulse", RectF(80, 42, 240, 44), 21, primary,
+        FontStyleBold, StringAlignmentNear, L"Bahnschrift");
+    Text(g, date, RectF(width - 360.0f, 42, 280, 44), 16, primary,
+        FontStyleRegular, StringAlignmentFar);
+    DrawShareTotal(g, RectF(90, 132, 850, 160), 86, 36, primary);
+    DrawKeyboard(g, RectF(78, 332, width - 156.0f, 406), false, KeyboardVisual::ShareLight);
+    Text(g, privacy, RectF(width - 500.0f, height - 66.0f, 420, 30), 12,
+        secondary, FontStyleRegular, StringAlignmentFar);
 }
 
 int GetEncoderClsid(const WCHAR* format, CLSID* clsid) {
@@ -1250,7 +1319,9 @@ int GetEncoderClsid(const WCHAR* format, CLSID* clsid) {
     return -1;
 }
 
-bool ExportPng(HWND owner) {
+enum class SaveImageResult { Cancelled, Saved, Error };
+
+SaveImageResult SaveShareImage(HWND owner, Bitmap& image) {
     wchar_t file[MAX_PATH]{};
     SYSTEMTIME selected = DateKeyToSystemTime(g_app.selected_date_key);
     swprintf_s(file, L"KeyPulse-%04d-%02d-%02d.png", selected.wYear, selected.wMonth, selected.wDay);
@@ -1262,19 +1333,184 @@ bool ExportPng(HWND owner) {
     dialog.nMaxFile = MAX_PATH;
     dialog.lpstrDefExt = L"png";
     dialog.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
-    if (!GetSaveFileNameW(&dialog)) return false;
-    Bitmap image(1600, 900, PixelFormat32bppARGB);
-    Graphics graphics(&image);
-    DrawShareCard(graphics, 1600, 900);
+    if (!GetSaveFileNameW(&dialog)) return SaveImageResult::Cancelled;
     CLSID encoder{};
-    if (GetEncoderClsid(L"image/png", &encoder) < 0) return false;
+    if (GetEncoderClsid(L"image/png", &encoder) < 0) {
+        MessageBoxW(owner, L"系统中没有可用的 PNG 编码器。", L"导出失败", MB_OK | MB_ICONERROR);
+        return SaveImageResult::Error;
+    }
     Status status = image.Save(file, &encoder, nullptr);
     if (status == Ok) {
         MessageBoxW(owner, L"PNG 分享图已成功导出。", L"KeyPulse", MB_OK | MB_ICONINFORMATION);
-        return true;
+        return SaveImageResult::Saved;
     }
     MessageBoxW(owner, L"图片导出失败，请尝试选择其他保存位置。", L"KeyPulse", MB_OK | MB_ICONERROR);
-    return false;
+    return SaveImageResult::Error;
+}
+
+bool RefreshPreviewImage() {
+    auto image = std::make_unique<Bitmap>(1600, 900, PixelFormat32bppARGB);
+    if (image->GetLastStatus() != Ok) return false;
+    Graphics graphics(image.get());
+    DrawShareCard(graphics, 1600, 900, g_preview.selected_template);
+    g_preview.image = std::move(image);
+    return true;
+}
+
+void DrawPreviewTemplateButton(Graphics& g, const RectF& button, const std::wstring& label, bool selected) {
+    FillRound(g, button, 8, selected ? C(47, 107, 77) : C(250, 251, 249));
+    StrokeRound(g, button, 8, selected ? C(47, 107, 77) : C(211, 219, 211));
+    Text(g, label, button, 10.5f, selected ? C(248, 251, 247) : C(65, 77, 68),
+        selected ? FontStyleBold : FontStyleRegular, StringAlignmentCenter);
+}
+
+void SavePreviewAndClose(HWND window) {
+    if (!g_preview.image) return;
+    if (SaveShareImage(window, *g_preview.image) == SaveImageResult::Saved) DestroyWindow(window);
+}
+
+LRESULT CALLBACK PreviewWindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
+    switch (message) {
+    case WM_PAINT: {
+        PAINTSTRUCT ps{};
+        HDC dc = BeginPaint(window, &ps);
+        RECT client{};
+        GetClientRect(window, &client);
+        int width = (std::max)(client.right, 1);
+        int height = (std::max)(client.bottom, 1);
+        Bitmap buffer(width, height, PixelFormat32bppPARGB);
+        Graphics graphics(&buffer);
+        graphics.SetSmoothingMode(SmoothingModeAntiAlias);
+        graphics.SetInterpolationMode(InterpolationModeHighQualityBicubic);
+        graphics.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
+        graphics.Clear(C(245, 247, 245));
+
+        Text(graphics, L"分享图片预览", RectF(24, 16, 170, 38), 14, C(31, 42, 34), FontStyleBold);
+        constexpr const wchar_t* labels[] = {L"A1  均衡留白", L"B  深色沉浸", L"C  非对称画廊"};
+        for (size_t i = 0; i < g_preview.template_buttons.size(); ++i) {
+            g_preview.template_buttons[i] = RectF(210.0f + static_cast<float>(i) * 142.0f, 16, 130, 38);
+            DrawPreviewTemplateButton(graphics, g_preview.template_buttons[i], labels[i],
+                static_cast<int>(g_preview.selected_template) == static_cast<int>(i));
+        }
+
+        constexpr float margin = 24.0f;
+        RectF available(margin, 72, static_cast<float>(width) - margin * 2.0f,
+            static_cast<float>(height) - 72.0f - 92.0f);
+        float preview_width = available.Width;
+        float preview_height = preview_width * 9.0f / 16.0f;
+        if (preview_height > available.Height) {
+            preview_height = available.Height;
+            preview_width = preview_height * 16.0f / 9.0f;
+        }
+        RectF preview(available.X + (available.Width - preview_width) / 2.0f,
+            available.Y + (available.Height - preview_height) / 2.0f, preview_width, preview_height);
+        FillRound(graphics, RectF(preview.X + 3, preview.Y + 5, preview.Width, preview.Height), 8, C(48, 72, 53, 24));
+        if (g_preview.image) graphics.DrawImage(g_preview.image.get(), preview);
+        StrokeRound(graphics, preview, 6, C(204, 213, 204));
+
+        float button_y = static_cast<float>(height) - 58.0f;
+        g_preview.save_button = RectF(static_cast<float>(width) - 160.0f, button_y, 132.0f, 38.0f);
+        g_preview.cancel_button = RectF(g_preview.save_button.X - 102.0f, button_y, 90.0f, 38.0f);
+        Text(graphics, L"1600 × 900 PNG", RectF(28, button_y, 220, 38), 10.5f, C(105, 115, 106),
+            FontStyleRegular, StringAlignmentNear, L"Bahnschrift");
+        DrawButton(graphics, g_preview.cancel_button, L"取消");
+        DrawButton(graphics, g_preview.save_button, L"保存图片", false, true);
+
+        Graphics screen(dc);
+        screen.DrawImage(&buffer, 0, 0);
+        EndPaint(window, &ps);
+        return 0;
+    }
+    case WM_LBUTTONUP: {
+        float x = static_cast<float>(GET_X_LPARAM(lparam));
+        float y = static_cast<float>(GET_Y_LPARAM(lparam));
+        for (size_t i = 0; i < g_preview.template_buttons.size(); ++i) {
+            if (!PointInside(g_preview.template_buttons[i], x, y)) continue;
+            g_preview.selected_template = static_cast<ShareTemplate>(i);
+            if (!RefreshPreviewImage()) {
+                MessageBoxW(window, L"无法生成分享图预览。", L"预览失败", MB_OK | MB_ICONERROR);
+            }
+            InvalidateRect(window, nullptr, FALSE);
+            return 0;
+        }
+        if (PointInside(g_preview.save_button, x, y)) SavePreviewAndClose(window);
+        else if (PointInside(g_preview.cancel_button, x, y)) DestroyWindow(window);
+        return 0;
+    }
+    case WM_KEYDOWN:
+        if (wparam == VK_ESCAPE) DestroyWindow(window);
+        else if (wparam == VK_RETURN) SavePreviewAndClose(window);
+        return 0;
+    case WM_SIZE:
+        InvalidateRect(window, nullptr, FALSE);
+        return 0;
+    case WM_GETMINMAXINFO: {
+        auto* info = reinterpret_cast<MINMAXINFO*>(lparam);
+        info->ptMinTrackSize.x = 820;
+        info->ptMinTrackSize.y = 590;
+        return 0;
+    }
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_CLOSE:
+        DestroyWindow(window);
+        return 0;
+    case WM_DESTROY:
+        g_preview.window = nullptr;
+        g_preview.image.reset();
+        if (g_preview.owner && IsWindow(g_preview.owner)) {
+            EnableWindow(g_preview.owner, TRUE);
+            SetForegroundWindow(g_preview.owner);
+        }
+        g_preview.owner = nullptr;
+        return 0;
+    default:
+        return DefWindowProcW(window, message, wparam, lparam);
+    }
+}
+
+void ShowExportPreview(HWND owner) {
+    if (g_preview.window) {
+        ShowWindow(g_preview.window, SW_RESTORE);
+        SetForegroundWindow(g_preview.window);
+        return;
+    }
+    g_preview.selected_template = ShareTemplate::Balanced;
+    if (!RefreshPreviewImage()) {
+        MessageBoxW(owner, L"无法生成分享图预览。", L"导出失败", MB_OK | MB_ICONERROR);
+        return;
+    }
+
+    constexpr DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME;
+    RECT desired{0, 0, 1180, 760};
+    AdjustWindowRectEx(&desired, style, FALSE, WS_EX_DLGMODALFRAME);
+    int window_width = desired.right - desired.left;
+    int window_height = desired.bottom - desired.top;
+    RECT work{};
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+    window_width = (std::min)(window_width, work.right - work.left - 48);
+    window_height = (std::min)(window_height, work.bottom - work.top - 48);
+    RECT owner_rect{};
+    GetWindowRect(owner, &owner_rect);
+    int x = owner_rect.left + ((owner_rect.right - owner_rect.left) - window_width) / 2;
+    int y = owner_rect.top + ((owner_rect.bottom - owner_rect.top) - window_height) / 2;
+    x = (std::max)(work.left + 24, (std::min)(x, work.right - window_width - 24));
+    y = (std::max)(work.top + 24, (std::min)(y, work.bottom - window_height - 24));
+
+    g_preview.owner = owner;
+    EnableWindow(owner, FALSE);
+    g_preview.window = CreateWindowExW(WS_EX_DLGMODALFRAME, kPreviewWindowClass, L"分享图片预览",
+        style, x, y, window_width, window_height, owner, nullptr, g_app.instance, nullptr);
+    if (!g_preview.window) {
+        EnableWindow(owner, TRUE);
+        g_preview.owner = nullptr;
+        g_preview.image.reset();
+        MessageBoxW(owner, L"无法打开分享图预览窗口。", L"导出失败", MB_OK | MB_ICONERROR);
+        return;
+    }
+    ShowWindow(g_preview.window, SW_SHOW);
+    UpdateWindow(g_preview.window);
+    SetFocus(g_preview.window);
 }
 
 void ShowMainWindow() {
@@ -1527,7 +1763,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
                 StartUpdateCheck(window, false);
             }
         }
-        else if (PointInside(g_app.export_button, x, y)) ExportPng(window);
+        else if (PointInside(g_app.export_button, x, y)) ShowExportPreview(window);
         else for (const auto& item : g_app.key_hitboxes) if (PointInside(item.first, x, y)) { g_app.selected_vk = item.second; InvalidateRect(window, nullptr, FALSE); break; }
         return 0;
     }
@@ -1570,7 +1806,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         switch (LOWORD(wparam)) {
         case ID_TRAY_OPEN: ShowMainWindow(); break;
         case ID_TRAY_PAUSE: ToggleRunning(); break;
-        case ID_TRAY_EXPORT: ShowMainWindow(); ExportPng(window); break;
+        case ID_TRAY_EXPORT: ShowMainWindow(); ShowExportPreview(window); break;
         case ID_TRAY_UPDATE:
             ShowMainWindow();
             if (g_app.update_available && g_app.update_busy == 0) {
@@ -1630,6 +1866,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show_command) {
     wc.hIconSm = wc.hIcon;
     wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
     if (!RegisterClassExW(&wc)) return 1;
+    WNDCLASSEXW preview_class = wc;
+    preview_class.lpfnWndProc = PreviewWindowProc;
+    preview_class.lpszClassName = kPreviewWindowClass;
+    if (!RegisterClassExW(&preview_class)) return 1;
     RECT desired{0, 0, 1360, 880};
     AdjustWindowRectEx(&desired, WS_OVERLAPPEDWINDOW, FALSE, 0);
     int screen_w = GetSystemMetrics(SM_CXSCREEN), screen_h = GetSystemMetrics(SM_CYSCREEN);
