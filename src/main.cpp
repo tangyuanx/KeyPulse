@@ -28,11 +28,13 @@ namespace fs = std::filesystem;
 namespace {
 constexpr wchar_t kWindowClass[] = L"KeyPulseNativeWindow";
 constexpr wchar_t kAppName[] = L"KeyPulse";
-constexpr wchar_t kAppVersion[] = L"0.2.1";
+constexpr wchar_t kAppVersion[] = L"0.2.2";
 constexpr wchar_t kLatestReleaseApi[] = L"https://api.github.com/repos/tangyuanx/KeyPulse/releases/latest";
 constexpr UINT WM_TRAYICON = WM_APP + 1;
 constexpr UINT WM_UPDATE_RESULT = WM_APP + 2;
 constexpr UINT_PTR TIMER_UI = 1;
+constexpr UINT_PTR TIMER_UPDATE = 2;
+constexpr UINT UPDATE_INTERVAL_MS = 10 * 60 * 1000;
 constexpr UINT ID_TRAY_OPEN = 1001;
 constexpr UINT ID_TRAY_PAUSE = 1002;
 constexpr UINT ID_TRAY_EXPORT = 1003;
@@ -85,6 +87,11 @@ struct AppState {
     RectF export_button{};
     RectF update_button{};
     int update_busy = 0;
+    bool update_available = false;
+    bool update_check_silent = false;
+    std::wstring available_version;
+    std::wstring available_download_url;
+    std::wstring available_checksum_url;
     std::vector<std::pair<RectF, UINT>> key_hitboxes;
     fs::path data_directory;
 };
@@ -436,9 +443,10 @@ void PostUpdateResult(HWND window, std::unique_ptr<UpdateResult> result) {
     if (!PostMessageW(window, WM_UPDATE_RESULT, 0, reinterpret_cast<LPARAM>(raw))) delete raw;
 }
 
-void StartUpdateCheck(HWND window) {
-    if (g_app.update_busy != 0) return;
+void StartUpdateCheck(HWND window, bool silent = false) {
+    if (g_app.update_busy != 0 || g_app.update_available) return;
     g_app.update_busy = 1;
+    g_app.update_check_silent = silent;
     InvalidateRect(window, nullptr, FALSE);
     std::thread([window]() {
         auto result = std::make_unique<UpdateResult>();
@@ -636,10 +644,13 @@ void DrawStatCard(Graphics& g, float x, float y, float w, const std::wstring& la
     Text(g, note, RectF(x + 22, y + 70, w - 44, 17), 9, C(133, 141, 134));
 }
 
-void DrawButton(Graphics& g, const RectF& r, const std::wstring& label, bool primary = false) {
-    FillRound(g, r, 8, primary ? C(28, 38, 28) : C(251, 252, 249));
-    StrokeRound(g, r, 8, primary ? C(28, 38, 28) : C(218, 225, 216));
-    Text(g, label, r, 11, primary ? C(245, 248, 241) : C(73, 84, 74), FontStyleRegular, StringAlignmentCenter);
+void DrawButton(Graphics& g, const RectF& r, const std::wstring& label, bool primary = false, bool accent = false) {
+    Color fill = accent ? C(47, 107, 77) : (primary ? C(28, 38, 28) : C(251, 252, 249));
+    Color border = accent ? C(37, 88, 62) : (primary ? C(28, 38, 28) : C(218, 225, 216));
+    Color text_color = (accent || primary) ? C(245, 248, 241) : C(73, 84, 74);
+    FillRound(g, r, 8, fill);
+    StrokeRound(g, r, 8, border);
+    Text(g, label, r, 11, text_color, accent ? FontStyleBold : FontStyleRegular, StringAlignmentCenter);
 }
 
 void DrawKeyboard(Graphics& g, const RectF& bounds, bool register_hits) {
@@ -757,8 +768,11 @@ void DrawDashboard(Graphics& g, int width, int height) {
     g_app.reset_button = RectF(right - 418, 17, 84, 34);
     DrawButton(g, g_app.reset_button, L"清空数据");
     DrawButton(g, g_app.pause_button, g_app.running ? L"暂停记录" : L"继续记录", true);
-    DrawButton(g, g_app.update_button, g_app.update_busy == 1 ? L"正在检查" :
-        (g_app.update_busy == 2 ? L"正在下载" : L"检查更新"));
+    std::wstring update_label = L"检查更新";
+    if (g_app.update_busy == 1 && !g_app.update_check_silent) update_label = L"正在检查";
+    else if (g_app.update_busy == 2) update_label = L"正在下载";
+    else if (g_app.update_available) update_label = L"更新 " + g_app.available_version;
+    DrawButton(g, g_app.update_button, update_label, false, g_app.update_available || g_app.update_busy == 2);
     DrawButton(g, g_app.export_button, L"导出图片");
     float content_w = static_cast<float>(width) - 56;
     Text(g, L"键盘敲击统计", RectF(28, 83, 330, 38), 27, C(25, 31, 26), FontStyleBold);
@@ -886,7 +900,9 @@ void ShowMainWindow() {
 }
 
 void UpdateTrayTip() {
-    wcscpy_s(g_app.tray.szTip, g_app.running ? L"KeyPulse · 正在记录" : L"KeyPulse · 已暂停");
+    const wchar_t* tip = g_app.update_available ? L"KeyPulse · 有新版本可用" :
+        (g_app.running ? L"KeyPulse · 正在记录" : L"KeyPulse · 已暂停");
+    wcscpy_s(g_app.tray.szTip, tip);
     Shell_NotifyIconW(NIM_MODIFY, &g_app.tray);
 }
 
@@ -922,6 +938,8 @@ void RecordRawKey(const RAWKEYBOARD& keyboard) {
         g_app.key_down[vk] = false;
         return;
     }
+    // Press state is tracked per virtual key. Holding Alt does not block a new
+    // Tab press, and holding Ctrl does not block C or V from being counted.
     if (g_app.key_down[vk]) return;
     g_app.key_down[vk] = true;
     if (!g_app.running) return;
@@ -975,7 +993,8 @@ void ShowTrayMenu(HWND window) {
     AppendMenuW(menu, MF_STRING, ID_TRAY_OPEN, L"打开 KeyPulse");
     AppendMenuW(menu, MF_STRING, ID_TRAY_PAUSE, g_app.running ? L"暂停记录" : L"继续记录");
     AppendMenuW(menu, MF_STRING, ID_TRAY_EXPORT, L"导出 PNG 分享图");
-    AppendMenuW(menu, MF_STRING, ID_TRAY_UPDATE, L"检查更新");
+    std::wstring update_label = g_app.update_available ? L"更新 " + g_app.available_version : L"检查更新";
+    AppendMenuW(menu, MF_STRING, ID_TRAY_UPDATE, update_label.c_str());
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, ID_TRAY_EXIT, L"退出");
     SetForegroundWindow(window);
@@ -992,6 +1011,8 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         }
         AddTrayIcon(window);
         SetTimer(window, TIMER_UI, 500, nullptr);
+        SetTimer(window, TIMER_UPDATE, UPDATE_INTERVAL_MS, nullptr);
+        StartUpdateCheck(window, true);
         return 0;
     case WM_INPUT:
         HandleRawInput(lparam);
@@ -1010,22 +1031,35 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         return 0;
     }
     case WM_TIMER:
+        if (wparam == TIMER_UPDATE) {
+            StartUpdateCheck(window, true);
+            return 0;
+        }
         if (TodayKey() != g_app.date_key) ResetForNewDay();
         if (g_app.dirty && GetTickCount64() - g_app.last_save_tick >= 15000) SaveData();
         if (IsWindowVisible(window)) InvalidateRect(window, nullptr, FALSE);
         return 0;
     case WM_UPDATE_RESULT: {
         std::unique_ptr<UpdateResult> result(reinterpret_cast<UpdateResult*>(lparam));
+        bool silent = g_app.update_check_silent;
         g_app.update_busy = 0;
+        g_app.update_check_silent = false;
         InvalidateRect(window, nullptr, FALSE);
         if (!result) return 0;
         if (result->kind == UpdateResultKind::UpToDate) {
-            MessageBoxW(window, L"当前已经是最新版本。", L"KeyPulse 更新", MB_OK | MB_ICONINFORMATION);
+            g_app.update_available = false;
+            g_app.available_version.clear();
+            g_app.available_download_url.clear();
+            g_app.available_checksum_url.clear();
+            UpdateTrayTip();
+            if (!silent) MessageBoxW(window, L"当前已经是最新版本。", L"KeyPulse 更新", MB_OK | MB_ICONINFORMATION);
         } else if (result->kind == UpdateResultKind::Available) {
-            std::wstring prompt = L"发现新版本 " + result->version + L"。\n\n是否立即下载，完成后自动重启 KeyPulse？";
-            if (MessageBoxW(window, prompt.c_str(), L"KeyPulse 更新", MB_YESNO | MB_ICONINFORMATION) == IDYES) {
-                StartUpdateDownload(window, result->version, result->download_url, result->checksum_url);
-            }
+            g_app.update_available = true;
+            g_app.available_version = result->version;
+            g_app.available_download_url = result->download_url;
+            g_app.available_checksum_url = result->checksum_url;
+            UpdateTrayTip();
+            InvalidateRect(window, nullptr, FALSE);
         } else if (result->kind == UpdateResultKind::Downloaded) {
             std::wstring error;
             if (LaunchUpdateInstaller(result->downloaded_file, error)) {
@@ -1037,7 +1071,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
             }
         } else {
             std::wstring message_text = result->message.empty() ? L"检查更新失败，请稍后重试。" : result->message;
-            MessageBoxW(window, message_text.c_str(), L"更新失败", MB_OK | MB_ICONERROR);
+            if (!silent) MessageBoxW(window, message_text.c_str(), L"更新失败", MB_OK | MB_ICONERROR);
         }
         return 0;
     }
@@ -1046,7 +1080,14 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         float y = static_cast<float>(GET_Y_LPARAM(lparam));
         if (PointInside(g_app.pause_button, x, y)) ToggleRunning();
         else if (PointInside(g_app.reset_button, x, y)) ResetToday(window);
-        else if (PointInside(g_app.update_button, x, y)) StartUpdateCheck(window);
+        else if (PointInside(g_app.update_button, x, y)) {
+            if (g_app.update_available && g_app.update_busy == 0) {
+                StartUpdateDownload(window, g_app.available_version, g_app.available_download_url,
+                    g_app.available_checksum_url);
+            } else {
+                StartUpdateCheck(window, false);
+            }
+        }
         else if (PointInside(g_app.export_button, x, y)) ExportPng(window);
         else for (const auto& item : g_app.key_hitboxes) if (PointInside(item.first, x, y)) { g_app.selected_vk = item.second; InvalidateRect(window, nullptr, FALSE); break; }
         return 0;
@@ -1082,13 +1123,22 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         case ID_TRAY_OPEN: ShowMainWindow(); break;
         case ID_TRAY_PAUSE: ToggleRunning(); break;
         case ID_TRAY_EXPORT: ShowMainWindow(); ExportPng(window); break;
-        case ID_TRAY_UPDATE: ShowMainWindow(); StartUpdateCheck(window); break;
+        case ID_TRAY_UPDATE:
+            ShowMainWindow();
+            if (g_app.update_available && g_app.update_busy == 0) {
+                StartUpdateDownload(window, g_app.available_version, g_app.available_download_url,
+                    g_app.available_checksum_url);
+            } else {
+                StartUpdateCheck(window, false);
+            }
+            break;
         case ID_TRAY_EXIT: g_app.exit_requested = true; SendMessageW(window, WM_CLOSE, 0, 0); break;
         default: break;
         }
         return 0;
     case WM_DESTROY:
         KillTimer(window, TIMER_UI);
+        KillTimer(window, TIMER_UPDATE);
         SaveData();
         Shell_NotifyIconW(NIM_DELETE, &g_app.tray);
         PostQuitMessage(0);
