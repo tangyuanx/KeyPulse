@@ -294,7 +294,7 @@ void DrawKeyboard(Graphics& g, const RectF& bounds, bool register_hits) {
             bool bright = g_app.counts[key.vk] > maximum * 45 / 100 && maximum > 0;
             bool selected = register_hits && key.vk == g_app.selected_vk;
             StrokeRound(g, r, 4, selected ? C(34, 103, 68) : C(204, 211, 202), selected ? 2.0f : 1.0f);
-            Text(g, key.label, RectF(r.X + 6, r.Y + 3, r.Width - 12, r.Height * .46f), r.Width < 42 ? 8 : 9,
+            Text(g, key.label, RectF(r.X + 6, r.Y + 3, r.Width - 12, r.Height * .46f), r.Width < 42 ? 8.0f : 9.0f,
                  bright ? C(255, 255, 253) : C(39, 46, 40), FontStyleRegular);
             if (g_app.counts[key.vk] > 0) Text(g, FormatNumber(g_app.counts[key.vk]), RectF(r.X + 6, r.Y + r.Height * .48f, r.Width - 12, r.Height * .40f), 7,
                  bright ? C(226, 240, 229) : C(115, 126, 116));
@@ -360,7 +360,7 @@ void DrawChart(Graphics& g, const RectF& panel) {
         line.SetLineJoin(LineJoinRound);
         g.DrawLines(&line, points.data(), static_cast<INT>(points.size()));
         SolidBrush dot(C(47, 107, 77));
-        g.FillEllipse(&dot, points.back().X - 3, points.back().Y - 3, 6, 6);
+        g.FillEllipse(&dot, RectF(points.back().X - 3.0f, points.back().Y - 3.0f, 6.0f, 6.0f));
     }
 }
 
@@ -458,7 +458,7 @@ void DrawShareCard(Graphics& g, int width, int height) {
         Text(g, KeyLabel(top[i].first), key, 14, C(31, 76, 53), FontStyleBold, StringAlignmentCenter);
         Text(g, FormatNumber(top[i].second), RectF(key.GetRight() + 18, 674, 150, 42), 20, C(47, 107, 77), FontStyleBold);
     }
-    g.DrawLine(&divider, 58, height - 98.0f, width - 58.0f, height - 98.0f);
+    g.DrawLine(&divider, PointF(58.0f, height - 98.0f), PointF(width - 58.0f, height - 98.0f));
     Text(g, L"仅统计次数，不记录输入内容", RectF(58, height - 85.0f, width - 116.0f, 34), 12, C(104, 114, 105));
 }
 
