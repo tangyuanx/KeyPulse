@@ -10,6 +10,6 @@ set_property(TARGET KeyPulse PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CON
 target_compile_definitions(KeyPulse PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(KeyPulse PRIVATE /utf-8 /W4 /permissive- /EHsc)
 target_link_options(KeyPulse PRIVATE /MANIFESTUAC:"level='asInvoker' uiAccess='false'")
-target_link_libraries(KeyPulse PRIVATE gdiplus comdlg32 shell32 user32 gdi32 ole32 winhttp bcrypt)
+target_link_libraries(KeyPulse PRIVATE gdiplus comdlg32 shell32 user32 gdi32 ole32 winhttp)
 
 install(TARGETS KeyPulse RUNTIME DESTINATION .)

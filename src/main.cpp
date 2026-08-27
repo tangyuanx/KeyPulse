@@ -5,7 +5,6 @@
 #include <shlobj.h>
 #include <gdiplus.h>
 #include <winhttp.h>
-#include <bcrypt.h>
 
 #include <algorithm>
 #include <array>
@@ -18,7 +17,6 @@
 #include <iterator>
 #include <memory>
 #include <numeric>
-#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -30,17 +28,13 @@ namespace {
 constexpr wchar_t kWindowClass[] = L"KeyPulseNativeWindow";
 constexpr wchar_t kPreviewWindowClass[] = L"KeyPulseExportPreviewWindow";
 constexpr wchar_t kAppName[] = L"KeyPulse";
-constexpr wchar_t kAppVersion[] = L"0.3.4";
+constexpr wchar_t kAppVersion[] = L"0.3.5";
 constexpr wchar_t kLatestVersionUrl[] = L"https://github.com/tangyuanx/KeyPulse/releases/latest/download/VERSION";
-constexpr wchar_t kLatestExecutableUrl[] = L"https://github.com/tangyuanx/KeyPulse/releases/latest/download/KeyPulse.exe";
-constexpr wchar_t kLatestChecksumUrl[] = L"https://github.com/tangyuanx/KeyPulse/releases/latest/download/KeyPulse.exe.sha256";
+constexpr wchar_t kReleasesUrl[] = L"https://github.com/tangyuanx/KeyPulse/releases/tag/";
 constexpr UINT WM_TRAYICON = WM_APP + 1;
 constexpr UINT WM_UPDATE_RESULT = WM_APP + 2;
 constexpr UINT_PTR TIMER_UI = 1;
-constexpr UINT_PTR TIMER_UPDATE = 2;
-constexpr UINT UPDATE_INTERVAL_MS = 10 * 60 * 1000;
 constexpr UINT ID_TRAY_OPEN = 1001;
-constexpr UINT ID_TRAY_PAUSE = 1002;
 constexpr UINT ID_TRAY_EXPORT = 1003;
 constexpr UINT ID_TRAY_UPDATE = 1004;
 constexpr UINT ID_TRAY_EXIT = 1005;
@@ -52,14 +46,11 @@ struct KeyDef { const wchar_t* label; UINT vk; float units; };
 enum class ShareTemplate { Balanced, Dark, Gallery };
 enum class KeyboardVisual { App, ShareLight, ShareDark };
 
-enum class UpdateResultKind { UpToDate, Available, Downloaded, Error };
+enum class UpdateResultKind { UpToDate, Available, Error };
 
 struct UpdateResult {
     UpdateResultKind kind = UpdateResultKind::Error;
     std::wstring version;
-    std::wstring download_url;
-    std::wstring checksum_url;
-    std::wstring downloaded_file;
     std::wstring message;
 };
 
@@ -67,7 +58,7 @@ struct PersistedData {
     uint32_t magic = DATA_MAGIC;
     uint32_t version = 1;
     int32_t date_key = 0;
-    uint8_t paused = 0;
+    uint8_t reserved_state = 0; // Preserves the v1 file layout; legacy pause values are ignored.
     uint8_t reserved[7]{};
     uint64_t counts[256]{};
     int64_t minute_stamp[60]{};
@@ -95,7 +86,6 @@ struct AppState {
     std::array<uint32_t, 1440> day_minutes{};
     std::array<uint64_t, 256> history_counts{};
     std::array<uint32_t, 1440> history_minutes{};
-    bool running = true;
     bool exit_requested = false;
     bool dirty = false;
     bool tray_hint_shown = false;
@@ -114,17 +104,13 @@ struct AppState {
     std::array<bool, 42> calendar_has_data{};
     UINT selected_vk = VK_SPACE;
     ULONGLONG last_save_tick = 0;
-    RectF pause_button{};
     RectF reset_button{};
     RectF export_button{};
     RectF update_button{};
     RectF date_button{};
     int update_busy = 0;
     bool update_available = false;
-    bool update_check_silent = false;
     std::wstring available_version;
-    std::wstring available_download_url;
-    std::wstring available_checksum_url;
     std::vector<std::pair<RectF, UINT>> key_hitboxes;
     fs::path data_directory;
 };
@@ -501,51 +487,6 @@ bool ParseReleaseVersion(const std::vector<unsigned char>& bytes, std::wstring& 
     return true;
 }
 
-std::string Sha256Hex(const std::vector<unsigned char>& bytes) {
-    BCRYPT_ALG_HANDLE algorithm = nullptr;
-    BCRYPT_HASH_HANDLE hash = nullptr;
-    DWORD object_length = 0, hash_length = 0, result_size = 0;
-    std::string result;
-    if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0) < 0) return result;
-    if (BCryptGetProperty(algorithm, BCRYPT_OBJECT_LENGTH, reinterpret_cast<PUCHAR>(&object_length),
-        sizeof(object_length), &result_size, 0) < 0 ||
-        BCryptGetProperty(algorithm, BCRYPT_HASH_LENGTH, reinterpret_cast<PUCHAR>(&hash_length),
-        sizeof(hash_length), &result_size, 0) < 0) {
-        BCryptCloseAlgorithmProvider(algorithm, 0);
-        return result;
-    }
-    std::vector<unsigned char> object(object_length);
-    std::vector<unsigned char> digest(hash_length);
-    if (BCryptCreateHash(algorithm, &hash, object.data(), object_length, nullptr, 0, 0) >= 0 &&
-        BCryptHashData(hash, const_cast<PUCHAR>(bytes.data()), static_cast<ULONG>(bytes.size()), 0) >= 0 &&
-        BCryptFinishHash(hash, digest.data(), hash_length, 0) >= 0) {
-        constexpr char digits[] = "0123456789abcdef";
-        result.reserve(digest.size() * 2);
-        for (unsigned char byte : digest) {
-            result.push_back(digits[byte >> 4]);
-            result.push_back(digits[byte & 0x0f]);
-        }
-    }
-    if (hash) BCryptDestroyHash(hash);
-    BCryptCloseAlgorithmProvider(algorithm, 0);
-    return result;
-}
-
-std::string FirstSha256(const std::vector<unsigned char>& bytes) {
-    std::string text(bytes.begin(), bytes.end());
-    std::string result;
-    for (char ch : text) {
-        bool hexadecimal = (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F');
-        if (!hexadecimal) {
-            if (!result.empty()) break;
-            continue;
-        }
-        result.push_back(ch >= 'A' && ch <= 'F' ? static_cast<char>(ch - 'A' + 'a') : ch);
-        if (result.size() == 64) break;
-    }
-    return result.size() == 64 ? result : std::string{};
-}
-
 std::vector<int> VersionParts(std::wstring version) {
     if (!version.empty() && (version.front() == L'v' || version.front() == L'V')) version.erase(version.begin());
     std::vector<int> parts;
@@ -577,10 +518,9 @@ void PostUpdateResult(HWND window, std::unique_ptr<UpdateResult> result) {
     if (!PostMessageW(window, WM_UPDATE_RESULT, 0, reinterpret_cast<LPARAM>(raw))) delete raw;
 }
 
-void StartUpdateCheck(HWND window, bool silent = false) {
+void StartUpdateCheck(HWND window) {
     if (g_app.update_busy != 0 || g_app.update_available) return;
     g_app.update_busy = 1;
-    g_app.update_check_silent = silent;
     InvalidateRect(window, nullptr, FALSE);
     std::thread([window]() {
         auto result = std::make_unique<UpdateResult>();
@@ -602,115 +542,17 @@ void StartUpdateCheck(HWND window, bool silent = false) {
             return;
         }
         result->kind = UpdateResultKind::Available;
-        result->download_url = kLatestExecutableUrl;
-        result->checksum_url = kLatestChecksumUrl;
         PostUpdateResult(window, std::move(result));
     }).detach();
 }
 
-void StartUpdateDownload(HWND window, std::wstring version, std::wstring url, std::wstring checksum_url) {
-    g_app.update_busy = 2;
-    InvalidateRect(window, nullptr, FALSE);
-    std::thread([window, version = std::move(version), url = std::move(url), checksum_url = std::move(checksum_url)]() {
-        auto result = std::make_unique<UpdateResult>();
-        result->version = version;
-        std::vector<unsigned char> bytes;
-        std::wstring error;
-        if (!HttpGet(url, bytes, error) || bytes.size() < 2 || bytes[0] != 'M' || bytes[1] != 'Z') {
-            result->message = error.empty() ? L"下载到的文件不是有效的 Windows 程序" : error;
-            PostUpdateResult(window, std::move(result));
-            return;
-        }
-        std::vector<unsigned char> checksum_bytes;
-        if (!HttpGet(checksum_url, checksum_bytes, error, 4096)) {
-            result->message = L"无法下载 SHA-256 校验文件：" + error;
-            PostUpdateResult(window, std::move(result));
-            return;
-        }
-        std::string expected_hash = FirstSha256(checksum_bytes);
-        std::string actual_hash = Sha256Hex(bytes);
-        if (expected_hash.empty() || actual_hash.empty() || expected_hash != actual_hash) {
-            result->message = L"新版程序的 SHA-256 校验失败，已停止更新";
-            PostUpdateResult(window, std::move(result));
-            return;
-        }
-        try {
-            fs::path file = fs::temp_directory_path() /
-                (L"KeyPulse-update-" + std::to_wstring(GetCurrentProcessId()) + L".exe");
-            std::ofstream stream(file, std::ios::binary | std::ios::trunc);
-            stream.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-            stream.close();
-            if (!stream) throw std::runtime_error("write failed");
-            result->kind = UpdateResultKind::Downloaded;
-            result->downloaded_file = file.wstring();
-        } catch (...) {
-            result->message = L"无法把新版程序写入临时目录";
-        }
-        PostUpdateResult(window, std::move(result));
-    }).detach();
-}
-
-bool LaunchUpdateInstaller(const std::wstring& downloaded_file, std::wstring& error) {
-    fs::path target = ExecutablePath();
-    fs::path probe = ExecutableDirectory() /
-        (L".keypulse-write-test-" + std::to_wstring(GetCurrentProcessId()));
-    HANDLE probe_handle = CreateFileW(probe.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
-        FILE_ATTRIBUTE_TEMPORARY, nullptr);
-    if (probe_handle == INVALID_HANDLE_VALUE) {
-        error = L"当前程序目录不可写，请把 KeyPulse.exe 移到普通文件夹后再更新";
-        return false;
+void OpenReleasePage(HWND owner) {
+    if (g_app.available_version.empty()) return;
+    std::wstring url = std::wstring(kReleasesUrl) + g_app.available_version;
+    HINSTANCE opened = ShellExecuteW(owner, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    if (reinterpret_cast<INT_PTR>(opened) <= 32) {
+        MessageBoxW(owner, L"无法打开 GitHub Release 页面，请稍后重试。", L"KeyPulse 更新", MB_OK | MB_ICONERROR);
     }
-    CloseHandle(probe_handle);
-    DeleteFileW(probe.c_str());
-    fs::path helper = fs::temp_directory_path() /
-        (L"KeyPulse-updater-" + std::to_wstring(GetCurrentProcessId()) + L".exe");
-    if (!CopyFileW(target.c_str(), helper.c_str(), FALSE)) {
-        error = L"无法创建原生更新程序，错误代码 " + std::to_wstring(GetLastError());
-        return false;
-    }
-    std::wstring command = L"\"" + helper.wstring() + L"\" --apply-update \"" + downloaded_file +
-        L"\" \"" + target.wstring() + L"\" " + std::to_wstring(GetCurrentProcessId());
-    std::vector<wchar_t> mutable_command(command.begin(), command.end());
-    mutable_command.push_back(L'\0');
-    STARTUPINFOW startup{};
-    startup.cb = sizeof(startup);
-    PROCESS_INFORMATION process{};
-    if (!CreateProcessW(helper.c_str(), mutable_command.data(), nullptr, nullptr, FALSE, 0,
-        nullptr, nullptr, &startup, &process)) {
-        error = L"无法启动更新程序，错误代码 " + std::to_wstring(GetLastError());
-        DeleteFileW(helper.c_str());
-        return false;
-    }
-    CloseHandle(process.hThread);
-    CloseHandle(process.hProcess);
-    return true;
-}
-
-int ApplyDownloadedUpdate(const fs::path& source, const fs::path& target, DWORD parent_process_id) {
-    HANDLE parent = OpenProcess(SYNCHRONIZE, FALSE, parent_process_id);
-    if (parent) {
-        WaitForSingleObject(parent, 30000);
-        CloseHandle(parent);
-    } else {
-        Sleep(1000);
-    }
-    bool replaced = false;
-    for (int attempt = 0; attempt < 20; ++attempt) {
-        if (CopyFileW(source.c_str(), target.c_str(), FALSE)) {
-            replaced = true;
-            break;
-        }
-        Sleep(500);
-    }
-    if (!replaced) {
-        MessageBoxW(nullptr, L"无法替换旧版 KeyPulse，请手动下载最新 Release。", L"KeyPulse 更新失败", MB_OK | MB_ICONERROR);
-        return 1;
-    }
-    DeleteFileW(source.c_str());
-    HINSTANCE launched = ShellExecuteW(nullptr, L"open", target.c_str(), nullptr, target.parent_path().c_str(), SW_SHOWNORMAL);
-    fs::path helper = ExecutablePath();
-    MoveFileExW(helper.c_str(), nullptr, MOVEFILE_DELAY_UNTIL_REBOOT);
-    return reinterpret_cast<INT_PTR>(launched) > 32 ? 0 : 1;
 }
 
 fs::path HistoryPath(int date_key) {
@@ -772,7 +614,6 @@ void SaveData() {
         fs::create_directories(g_app.data_directory);
         PersistedData data;
         data.date_key = g_app.date_key;
-        data.paused = g_app.running ? 0 : 1;
         std::copy(g_app.counts.begin(), g_app.counts.end(), data.counts);
         std::copy(g_app.minute_stamp.begin(), g_app.minute_stamp.end(), data.minute_stamp);
         std::copy(g_app.minute_count.begin(), g_app.minute_count.end(), data.minute_count);
@@ -797,7 +638,6 @@ void LoadData() {
         PersistedData data;
         stream.read(reinterpret_cast<char*>(&data), sizeof(data));
         if (stream.gcount() == sizeof(data) && data.magic == DATA_MAGIC && data.version == 1) {
-            g_app.running = data.paused == 0;
             auto legacy_minutes = MinutesFromLegacyRing(data);
             if (data.date_key == g_app.date_key) {
                 std::copy(std::begin(data.counts), std::end(data.counts), g_app.counts.begin());
@@ -1176,16 +1016,13 @@ void DrawDashboard(Graphics& g, int width, int height) {
     Text(g, std::wstring(L"v") + kAppVersion, RectF(164, 18, 58, 30), 9.5f, C(118, 128, 119), FontStyleRegular, StringAlignmentNear, L"Bahnschrift");
     float right = static_cast<float>(width) - 28;
     g_app.export_button = RectF(right - 104, 17, 104, 34);
-    g_app.update_button = RectF(right - 214, 17, 100, 34);
-    g_app.pause_button = RectF(right - 324, 17, 100, 34);
-    g_app.reset_button = RectF(right - 418, 17, 84, 34);
+    g_app.update_button = RectF(right - 254, 17, 140, 34);
+    g_app.reset_button = RectF(right - 348, 17, 84, 34);
     DrawButton(g, g_app.reset_button, L"清空数据");
-    DrawButton(g, g_app.pause_button, g_app.running ? L"暂停记录" : L"继续记录", true);
     std::wstring update_label = L"检查更新";
-    if (g_app.update_busy == 1 && !g_app.update_check_silent) update_label = L"正在检查";
-    else if (g_app.update_busy == 2) update_label = L"正在下载";
-    else if (g_app.update_available) update_label = L"更新 " + g_app.available_version;
-    DrawButton(g, g_app.update_button, update_label, false, g_app.update_available || g_app.update_busy == 2);
+    if (g_app.update_busy == 1) update_label = L"正在检查";
+    else if (g_app.update_available) update_label = L"前往下载 " + g_app.available_version;
+    DrawButton(g, g_app.update_button, update_label, false, g_app.update_available);
     DrawButton(g, g_app.export_button, L"导出图片");
     float content_w = static_cast<float>(width) - 56;
     Text(g, L"键盘敲击统计", RectF(28, 86, 330, 38), 26, C(25, 31, 26), FontStyleBold);
@@ -1202,7 +1039,7 @@ void DrawDashboard(Graphics& g, int width, int height) {
         g.DrawLine(&metric_divider, divider_x, cards_y + 18, divider_x, cards_y + 84);
     }
     if (ViewingToday()) {
-        DrawStatCard(g, 28, cards_y, card_w, L"今日敲击", FormatNumber(TotalCount()) + L" 次", g_app.running ? L"正在实时记录" : L"记录已暂停", C(47, 107, 77));
+        DrawStatCard(g, 28, cards_y, card_w, L"今日敲击", FormatNumber(TotalCount()) + L" 次", L"正在实时记录", C(47, 107, 77));
         DrawStatCard(g, 28 + card_w, cards_y, card_w, L"当前速度", std::to_wstring(CurrentRate()) + L" 次/分", L"当前分钟累计", C(47, 107, 77));
         DrawStatCard(g, 28 + card_w * 2, cards_y, card_w, L"峰值速度", std::to_wstring(DayPeakRate()) + L" 次/分", L"今天", C(225, 124, 36));
         DrawStatCard(g, 28 + card_w * 3, cards_y, card_w, L"活跃时间", std::to_wstring(ActiveMinutes()) + L" 分钟", L"今天", C(47, 107, 77));
@@ -1550,17 +1387,9 @@ bool HandleCalendarClick(float x, float y) {
 }
 
 void UpdateTrayTip() {
-    const wchar_t* tip = g_app.update_available ? L"KeyPulse · 有新版本可用" :
-        (g_app.running ? L"KeyPulse · 正在记录" : L"KeyPulse · 已暂停");
+    const wchar_t* tip = g_app.update_available ? L"KeyPulse · 有新版本可用" : L"KeyPulse · 正在记录";
     wcscpy_s(g_app.tray.szTip, tip);
     Shell_NotifyIconW(NIM_MODIFY, &g_app.tray);
-}
-
-void ToggleRunning() {
-    g_app.running = !g_app.running;
-    g_app.dirty = true;
-    UpdateTrayTip();
-    InvalidateRect(g_app.window, nullptr, FALSE);
 }
 
 void ResetToday(HWND owner) {
@@ -1600,7 +1429,6 @@ void RecordRawKey(const RAWKEYBOARD& keyboard) {
     // Tab press, and holding Ctrl does not block C or V from being counted.
     if (g_app.key_down[vk]) return;
     g_app.key_down[vk] = true;
-    if (!g_app.running) return;
     if (TodayKey() != g_app.date_key) ResetForNewDay();
     ++g_app.counts[vk];
     int64_t minute = EpochMinute();
@@ -1650,9 +1478,8 @@ void ShowTrayMenu(HWND window) {
     GetCursorPos(&point);
     HMENU menu = CreatePopupMenu();
     AppendMenuW(menu, MF_STRING, ID_TRAY_OPEN, L"打开 KeyPulse");
-    AppendMenuW(menu, MF_STRING, ID_TRAY_PAUSE, g_app.running ? L"暂停记录" : L"继续记录");
     AppendMenuW(menu, MF_STRING, ID_TRAY_EXPORT, L"导出 PNG 分享图");
-    std::wstring update_label = g_app.update_available ? L"更新 " + g_app.available_version : L"检查更新";
+    std::wstring update_label = g_app.update_available ? L"前往下载 " + g_app.available_version : L"检查更新";
     AppendMenuW(menu, MF_STRING, ID_TRAY_UPDATE, update_label.c_str());
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, ID_TRAY_EXIT, L"退出");
@@ -1670,8 +1497,6 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         }
         AddTrayIcon(window);
         SetTimer(window, TIMER_UI, 500, nullptr);
-        SetTimer(window, TIMER_UPDATE, UPDATE_INTERVAL_MS, nullptr);
-        StartUpdateCheck(window, true);
         return 0;
     case WM_INPUT:
         HandleRawInput(lparam);
@@ -1690,47 +1515,28 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         return 0;
     }
     case WM_TIMER:
-        if (wparam == TIMER_UPDATE) {
-            StartUpdateCheck(window, true);
-            return 0;
-        }
         if (TodayKey() != g_app.date_key) ResetForNewDay();
         if (g_app.dirty && GetTickCount64() - g_app.last_save_tick >= 15000) SaveData();
         if (IsWindowVisible(window)) InvalidateRect(window, nullptr, FALSE);
         return 0;
     case WM_UPDATE_RESULT: {
         std::unique_ptr<UpdateResult> result(reinterpret_cast<UpdateResult*>(lparam));
-        bool silent = g_app.update_check_silent;
         g_app.update_busy = 0;
-        g_app.update_check_silent = false;
         InvalidateRect(window, nullptr, FALSE);
         if (!result) return 0;
         if (result->kind == UpdateResultKind::UpToDate) {
             g_app.update_available = false;
             g_app.available_version.clear();
-            g_app.available_download_url.clear();
-            g_app.available_checksum_url.clear();
             UpdateTrayTip();
-            if (!silent) MessageBoxW(window, L"当前已经是最新版本。", L"KeyPulse 更新", MB_OK | MB_ICONINFORMATION);
+            MessageBoxW(window, L"当前已经是最新版本。", L"KeyPulse 更新", MB_OK | MB_ICONINFORMATION);
         } else if (result->kind == UpdateResultKind::Available) {
             g_app.update_available = true;
             g_app.available_version = result->version;
-            g_app.available_download_url = result->download_url;
-            g_app.available_checksum_url = result->checksum_url;
             UpdateTrayTip();
             InvalidateRect(window, nullptr, FALSE);
-        } else if (result->kind == UpdateResultKind::Downloaded) {
-            std::wstring error;
-            if (LaunchUpdateInstaller(result->downloaded_file, error)) {
-                SaveData();
-                g_app.exit_requested = true;
-                SendMessageW(window, WM_CLOSE, 0, 0);
-            } else {
-                MessageBoxW(window, error.c_str(), L"更新失败", MB_OK | MB_ICONERROR);
-            }
         } else {
             std::wstring message_text = result->message.empty() ? L"检查更新失败，请稍后重试。" : result->message;
-            if (!silent) MessageBoxW(window, message_text.c_str(), L"更新失败", MB_OK | MB_ICONERROR);
+            MessageBoxW(window, message_text.c_str(), L"更新失败", MB_OK | MB_ICONERROR);
         }
         return 0;
     }
@@ -1743,14 +1549,12 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
             return 0;
         }
         HideCalendar();
-        if (PointInside(g_app.pause_button, x, y)) ToggleRunning();
-        else if (PointInside(g_app.reset_button, x, y)) ResetToday(window);
+        if (PointInside(g_app.reset_button, x, y)) ResetToday(window);
         else if (PointInside(g_app.update_button, x, y)) {
             if (g_app.update_available && g_app.update_busy == 0) {
-                StartUpdateDownload(window, g_app.available_version, g_app.available_download_url,
-                    g_app.available_checksum_url);
+                OpenReleasePage(window);
             } else {
-                StartUpdateCheck(window, false);
+                StartUpdateCheck(window);
             }
         }
         else if (PointInside(g_app.export_button, x, y)) ShowExportPreview(window);
@@ -1795,15 +1599,13 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
     case WM_COMMAND:
         switch (LOWORD(wparam)) {
         case ID_TRAY_OPEN: ShowMainWindow(); break;
-        case ID_TRAY_PAUSE: ToggleRunning(); break;
         case ID_TRAY_EXPORT: ShowMainWindow(); ShowExportPreview(window); break;
         case ID_TRAY_UPDATE:
             ShowMainWindow();
             if (g_app.update_available && g_app.update_busy == 0) {
-                StartUpdateDownload(window, g_app.available_version, g_app.available_download_url,
-                    g_app.available_checksum_url);
+                OpenReleasePage(window);
             } else {
-                StartUpdateCheck(window, false);
+                StartUpdateCheck(window);
             }
             break;
         case ID_TRAY_EXIT: g_app.exit_requested = true; SendMessageW(window, WM_CLOSE, 0, 0); break;
@@ -1812,7 +1614,6 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         return 0;
     case WM_DESTROY:
         KillTimer(window, TIMER_UI);
-        KillTimer(window, TIMER_UPDATE);
         SaveData();
         Shell_NotifyIconW(NIM_DELETE, &g_app.tray);
         PostQuitMessage(0);
@@ -1824,16 +1625,6 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show_command) {
-    int argument_count = 0;
-    LPWSTR* arguments = CommandLineToArgvW(GetCommandLineW(), &argument_count);
-    if (arguments && argument_count == 5 && wcscmp(arguments[1], L"--apply-update") == 0) {
-        fs::path source = arguments[2];
-        fs::path target = arguments[3];
-        DWORD parent_process_id = wcstoul(arguments[4], nullptr, 10);
-        LocalFree(arguments);
-        return ApplyDownloadedUpdate(source, target, parent_process_id);
-    }
-    if (arguments) LocalFree(arguments);
     HANDLE mutex = CreateMutexW(nullptr, TRUE, L"Local\\KeyPulse-SingleInstance-6B1A5F7C");
     if (mutex && GetLastError() == ERROR_ALREADY_EXISTS) {
         if (HWND existing = FindWindowW(kWindowClass, nullptr)) { ShowWindow(existing, SW_RESTORE); SetForegroundWindow(existing); }
