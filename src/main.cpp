@@ -1376,8 +1376,8 @@ LRESULT CALLBACK PreviewWindowProc(HWND window, UINT message, WPARAM wparam, LPA
         HDC dc = BeginPaint(window, &ps);
         RECT client{};
         GetClientRect(window, &client);
-        int width = (std::max)(client.right, 1);
-        int height = (std::max)(client.bottom, 1);
+        int width = (std::max)(static_cast<int>(client.right), 1);
+        int height = (std::max)(static_cast<int>(client.bottom), 1);
         Bitmap buffer(width, height, PixelFormat32bppPARGB);
         Graphics graphics(&buffer);
         graphics.SetSmoothingMode(SmoothingModeAntiAlias);
@@ -1488,14 +1488,18 @@ void ShowExportPreview(HWND owner) {
     int window_height = desired.bottom - desired.top;
     RECT work{};
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
-    window_width = (std::min)(window_width, work.right - work.left - 48);
-    window_height = (std::min)(window_height, work.bottom - work.top - 48);
+    const int work_left = static_cast<int>(work.left);
+    const int work_top = static_cast<int>(work.top);
+    const int work_right = static_cast<int>(work.right);
+    const int work_bottom = static_cast<int>(work.bottom);
+    window_width = (std::min)(window_width, work_right - work_left - 48);
+    window_height = (std::min)(window_height, work_bottom - work_top - 48);
     RECT owner_rect{};
     GetWindowRect(owner, &owner_rect);
     int x = owner_rect.left + ((owner_rect.right - owner_rect.left) - window_width) / 2;
     int y = owner_rect.top + ((owner_rect.bottom - owner_rect.top) - window_height) / 2;
-    x = (std::max)(work.left + 24, (std::min)(x, work.right - window_width - 24));
-    y = (std::max)(work.top + 24, (std::min)(y, work.bottom - window_height - 24));
+    x = (std::max)(work_left + 24, (std::min)(x, work_right - window_width - 24));
+    y = (std::max)(work_top + 24, (std::min)(y, work_bottom - window_height - 24));
 
     g_preview.owner = owner;
     EnableWindow(owner, FALSE);
