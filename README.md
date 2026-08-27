@@ -15,6 +15,7 @@ KeyPulse 是一个无需安装的 Windows 键盘敲击统计工具。双击 `Key
 - 每个键独立记录按下状态；`Alt+Tab`、`Ctrl+C`、`Ctrl+V` 会分别统计组合中的每个按键
 - 内置“检查更新”，校验 Release SHA-256 后通过原生更新进程替换并重启
 - 启动后静默检查一次，此后每 10 分钟检查新版本；发现更新时按钮会变为绿色“更新”状态
+- 通过 Release 的 `VERSION` 文件发现新版本，不消耗 GitHub REST API 的未认证请求额度
 - 下载更新时支持 Windows 自动代理、默认代理和直连三种方式重试，GitHub 响应超时提高到 60 秒
 - 每 15 秒批量保存，不记录输入内容、顺序或当前窗口
 - 默认保存到 `%LOCALAPPDATA%\KeyPulse`
@@ -44,7 +45,7 @@ cmake --build build --config Release
 
 ## 版本与发布
 
-当前版本写在根目录的 `VERSION` 文件中。修改版本号并推送到 `main` 后，GitHub Actions 会构建 Windows EXE；如果对应的 `v版本号` Release 尚不存在，则自动创建 Release 并上传 `KeyPulse.exe` 与 `KeyPulse.exe.sha256`。
+当前版本写在根目录的 `VERSION` 文件中。修改版本号并推送到 `main` 后，GitHub Actions 会构建 Windows EXE；如果对应的 `v版本号` Release 尚不存在，则自动创建 Release 并上传 `KeyPulse.exe`、`KeyPulse.exe.sha256` 与 `VERSION`。
 
 正式版本请从 [GitHub Releases](https://github.com/tangyuanx/KeyPulse/releases) 下载。Actions 中的临时构建产物仍会保留 30 天，用于开发验证。
 

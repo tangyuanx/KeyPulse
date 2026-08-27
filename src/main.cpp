@@ -30,8 +30,10 @@ namespace {
 constexpr wchar_t kWindowClass[] = L"KeyPulseNativeWindow";
 constexpr wchar_t kPreviewWindowClass[] = L"KeyPulseExportPreviewWindow";
 constexpr wchar_t kAppName[] = L"KeyPulse";
-constexpr wchar_t kAppVersion[] = L"0.3.3";
-constexpr wchar_t kLatestReleaseApi[] = L"https://api.github.com/repos/tangyuanx/KeyPulse/releases/latest";
+constexpr wchar_t kAppVersion[] = L"0.3.4";
+constexpr wchar_t kLatestVersionUrl[] = L"https://github.com/tangyuanx/KeyPulse/releases/latest/download/VERSION";
+constexpr wchar_t kLatestExecutableUrl[] = L"https://github.com/tangyuanx/KeyPulse/releases/latest/download/KeyPulse.exe";
+constexpr wchar_t kLatestChecksumUrl[] = L"https://github.com/tangyuanx/KeyPulse/releases/latest/download/KeyPulse.exe.sha256";
 constexpr UINT WM_TRAYICON = WM_APP + 1;
 constexpr UINT WM_UPDATE_RESULT = WM_APP + 2;
 constexpr UINT_PTR TIMER_UI = 1;
@@ -385,7 +387,8 @@ bool HttpGetOnce(const std::wstring& url, std::vector<unsigned char>& body, std:
         error = L"无法连接 GitHub，错误代码 " + std::to_wstring(winhttp_error);
         return false;
     }
-    DWORD flags = parts.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0;
+    DWORD flags = WINHTTP_FLAG_REFRESH;
+    if (parts.nScheme == INTERNET_SCHEME_HTTPS) flags |= WINHTTP_FLAG_SECURE;
     WinHttpHandle request(WinHttpOpenRequest(connection, L"GET", path.c_str(), nullptr,
         WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, flags));
     if (!request) {
@@ -395,7 +398,7 @@ bool HttpGetOnce(const std::wstring& url, std::vector<unsigned char>& body, std:
     }
     DWORD redirect_policy = WINHTTP_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP;
     WinHttpSetOption(request, WINHTTP_OPTION_REDIRECT_POLICY, &redirect_policy, sizeof(redirect_policy));
-    const wchar_t headers[] = L"Accept: application/vnd.github+json\r\nX-GitHub-Api-Version: 2022-11-28\r\n";
+    const wchar_t headers[] = L"Accept: application/octet-stream\r\nCache-Control: no-cache\r\nPragma: no-cache\r\n";
     if (!WinHttpSendRequest(request, headers, static_cast<DWORD>(-1), WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) {
         winhttp_error = GetLastError();
         error = L"发送 GitHub 请求失败，错误代码 " + std::to_wstring(winhttp_error);
@@ -409,8 +412,11 @@ bool HttpGetOnce(const std::wstring& url, std::vector<unsigned char>& body, std:
     DWORD status = 0, status_size = sizeof(status);
     if (!WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
         WINHTTP_HEADER_NAME_BY_INDEX, &status, &status_size, WINHTTP_NO_HEADER_INDEX) || status != 200) {
-        error = L"GitHub 返回状态码 " + std::to_wstring(status);
-        if (status == 408 || status == 429 || status == 500 || status == 502 || status == 503 || status == 504) {
+        error = status == 403
+            ? L"GitHub 拒绝了下载请求（状态码 403），可能是当前网络出口受限"
+            : L"GitHub 返回状态码 " + std::to_wstring(status);
+        if (status == 403 || status == 408 || status == 429 || status == 500 ||
+            status == 502 || status == 503 || status == 504) {
             winhttp_error = ERROR_WINHTTP_INVALID_SERVER_RESPONSE;
         }
         return false;
@@ -463,45 +469,36 @@ bool HttpGet(const std::wstring& url, std::vector<unsigned char>& body, std::wst
     return false;
 }
 
-bool FindJsonString(const std::string& json, const std::string& key, size_t start,
-                    std::string& value, size_t& next) {
-    size_t key_pos = json.find("\"" + key + "\"", start);
-    if (key_pos == std::string::npos) return false;
-    size_t colon = json.find(':', key_pos + key.size() + 2);
-    size_t quote = colon == std::string::npos ? std::string::npos : json.find('"', colon + 1);
-    if (quote == std::string::npos) return false;
-    value.clear();
-    bool escaped = false;
-    for (size_t i = quote + 1; i < json.size(); ++i) {
-        char ch = json[i];
-        if (escaped) {
-            if (ch == 'n') value.push_back('\n');
-            else if (ch == 'r') value.push_back('\r');
-            else if (ch == 't') value.push_back('\t');
-            else value.push_back(ch);
-            escaped = false;
-        } else if (ch == '\\') {
-            escaped = true;
-        } else if (ch == '"') {
-            next = i + 1;
-            return true;
+bool ParseReleaseVersion(const std::vector<unsigned char>& bytes, std::wstring& version) {
+    std::string text(bytes.begin(), bytes.end());
+    size_t begin = text.size() >= 3 && static_cast<unsigned char>(text[0]) == 0xef &&
+        static_cast<unsigned char>(text[1]) == 0xbb && static_cast<unsigned char>(text[2]) == 0xbf ? 3 : 0;
+    while (begin < text.size() && (text[begin] == ' ' || text[begin] == '\t' ||
+        text[begin] == '\r' || text[begin] == '\n')) ++begin;
+    size_t end = text.size();
+    while (end > begin && (text[end - 1] == ' ' || text[end - 1] == '\t' ||
+        text[end - 1] == '\r' || text[end - 1] == '\n')) --end;
+    if (begin < end && (text[begin] == 'v' || text[begin] == 'V')) ++begin;
+    if (begin >= end) return false;
+
+    bool segment_has_digit = false;
+    int dot_count = 0;
+    for (size_t i = begin; i < end; ++i) {
+        char ch = text[i];
+        if (ch >= '0' && ch <= '9') {
+            segment_has_digit = true;
+        } else if (ch == '.' && segment_has_digit) {
+            segment_has_digit = false;
+            ++dot_count;
         } else {
-            value.push_back(ch);
+            return false;
         }
     }
-    return false;
-}
-
-std::string FindReleaseAssetUrl(const std::string& json, const std::string& wanted_name) {
-    size_t cursor = 0;
-    size_t next = 0;
-    std::string name;
-    std::string url;
-    while (FindJsonString(json, "name", cursor, name, next)) {
-        cursor = next;
-        if (name == wanted_name && FindJsonString(json, "browser_download_url", cursor, url, next)) return url;
-    }
-    return {};
+    if (!segment_has_digit || dot_count < 1) return false;
+    std::wstring parsed = Utf8ToWide(text.substr(begin, end - begin));
+    if (parsed.empty()) return false;
+    version = L"v" + parsed;
+    return true;
 }
 
 std::string Sha256Hex(const std::vector<unsigned char>& bytes) {
@@ -589,35 +586,24 @@ void StartUpdateCheck(HWND window, bool silent = false) {
         auto result = std::make_unique<UpdateResult>();
         std::vector<unsigned char> bytes;
         std::wstring error;
-        if (!HttpGet(kLatestReleaseApi, bytes, error, 2 * 1024 * 1024)) {
+        if (!HttpGet(kLatestVersionUrl, bytes, error, 128)) {
             result->message = error;
             PostUpdateResult(window, std::move(result));
             return;
         }
-        std::string json(bytes.begin(), bytes.end());
-        std::string tag;
-        size_t next = 0;
-        if (!FindJsonString(json, "tag_name", 0, tag, next)) {
-            result->message = L"GitHub Release 信息格式无法识别";
+        if (!ParseReleaseVersion(bytes, result->version)) {
+            result->message = L"GitHub Release 版本文件格式无法识别";
             PostUpdateResult(window, std::move(result));
             return;
         }
-        result->version = Utf8ToWide(tag);
         if (!IsNewerVersion(result->version, kAppVersion)) {
             result->kind = UpdateResultKind::UpToDate;
             PostUpdateResult(window, std::move(result));
             return;
         }
-        std::string url = FindReleaseAssetUrl(json, "KeyPulse.exe");
-        std::string checksum_url = FindReleaseAssetUrl(json, "KeyPulse.exe.sha256");
-        if (url.empty() || checksum_url.empty()) {
-            result->message = L"最新 Release 缺少程序或 SHA-256 校验文件";
-            PostUpdateResult(window, std::move(result));
-            return;
-        }
         result->kind = UpdateResultKind::Available;
-        result->download_url = Utf8ToWide(url);
-        result->checksum_url = Utf8ToWide(checksum_url);
+        result->download_url = kLatestExecutableUrl;
+        result->checksum_url = kLatestChecksumUrl;
         PostUpdateResult(window, std::move(result));
     }).detach();
 }
